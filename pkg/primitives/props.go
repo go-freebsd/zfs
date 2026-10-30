@@ -1,4 +1,4 @@
-package zfs
+package primitives
 
 import (
 	"fmt"

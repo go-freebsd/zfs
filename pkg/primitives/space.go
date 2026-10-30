@@ -1,4 +1,4 @@
-package zfs
+package primitives
 
 import (
 	"github.com/go-freebsd/nvlist/pkg/nvlist"

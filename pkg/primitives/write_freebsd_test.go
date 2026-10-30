@@ -1,6 +1,6 @@
 //go:build freebsd
 
-package zfs
+package primitives
 
 import (
 	"bytes"

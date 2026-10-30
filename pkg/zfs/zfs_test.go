@@ -1,388 +1,406 @@
 package zfs
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-freebsd/zfs/pkg/ioctl"
+	"github.com/go-freebsd/zfs/pkg/primitives"
 )
 
-func names(ds []*Dataset) []string {
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.Name
+func TestHandlesAreNames(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/home/alice")
+	if d.Name() != "tank/home/alice" || d.Pool() != "tank" || d.Parent().Name() != "tank/home" || d.Parent().Parent().Parent() != nil {
+		t.Errorf("handle names wrong: %s %s %v", d.Name(), d.Pool(), d.Parent())
 	}
-	return out
+	if d.Child("x/y").Name() != "tank/home/alice/x/y" {
+		t.Error("Child")
+	}
+	snap := c.Snapshot("tank/home@daily")
+	if snap.ShortName() != "daily" || snap.Dataset().Name() != "tank/home" {
+		t.Errorf("snapshot handle: %s %s", snap.ShortName(), snap.Dataset())
+	}
+	if c.Bookmark("tank/home#bm").Dataset().Name() != "tank/home" {
+		t.Error("bookmark handle")
+	}
+	if len(s.calls) != 0 {
+		t.Errorf("making handles touched the kernel: %v", s.calls)
+	}
+	pools, err := c.Pools()
+	if err != nil || len(pools) != 2 || pools[1].Name() != "zroot" {
+		t.Errorf("Pools = %v, %v", pools, err)
+	}
 }
 
-func TestGetDecodesStatsAndProperties(t *testing.T) {
-	c := newClient(newFake(t))
-
-	a, err := c.Get("tank/a")
+func TestCreateFilesystemMapsOptions(t *testing.T) {
+	c, s := newStub()
+	fsys, err := c.Dataset("tank").CreateFilesystem("home/alice",
+		WithCompression(ZSTDLevel(5)), WithQuota(10*GiB), WithRecordSize(64*KiB), WithMountpoint("/home/alice"),
+		WithAtime(false), WithChecksum(SHA512), WithSync(SyncAlways), WithCopies(2), WithReadOnly(false),
+		WithProp("note:owner", "ops"), WithCaseSensitivity("insensitive"), WithUTF8Only(true), Parents())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Name != "tank/a" || a.Type != Filesystem || a.GUID != 1010 || a.CreationTxg != 10 {
-		t.Errorf("%+v", a)
+	if fsys.Name() != "tank/home/alice" || s.last() != "Create tank/home/alice" {
+		t.Errorf("created %s via %q", fsys, s.last())
 	}
-	if got := a.Props["compression"]; got != (Property{Value: uint64(15), Source: "tank/a"}) {
-		t.Errorf("compression = %#v", got)
+	want := map[string]any{
+		"compression": "zstd-5", "quota": 10 * GiB, "recordsize": 64 * KiB, "mountpoint": "/home/alice",
+		"atime": false, "checksum": "sha512", "sync": "always", "copies": "2", "readonly": false,
+		"note:owner": "ops", "casesensitivity": "insensitive", "utf8only": true,
 	}
-	if a.Mountpoint() != "/tank/a" || a.Used() != 1000 || a.Available() != 1<<20 || a.Referenced() != 100 {
-		t.Errorf("helpers: %q %d %d %d", a.Mountpoint(), a.Used(), a.Available(), a.Referenced())
+	if !reflect.DeepEqual(s.createOpts.Props, want) {
+		t.Errorf("props = %v\nwant    %v", s.createOpts.Props, want)
 	}
-	if a.Creation().Unix() != 1700000010 {
-		t.Errorf("creation = %v", a.Creation())
-	}
-	if _, ok := a.Uint64("mountpoint"); ok {
-		t.Error("a string property is not a number")
-	}
-	if _, ok := a.String("used"); ok {
-		t.Error("a numeric property is not a string")
-	}
-	if a.Quota() != 0 {
-		t.Error("absent property must read as zero")
-	}
-
-	vol, _ := c.Get("tank/vol")
-	if vol.Type != Volume {
-		t.Errorf("volume type = %v", vol.Type)
-	}
-	snap, _ := c.Get("tank/a@s1")
-	if snap.Type != Snapshot || snap.NumClones != 1 {
-		t.Errorf("snapshot = %+v", snap)
-	}
-	clone, _ := c.Get("tank/clone")
-	if clone.Origin != "tank/a@s1" {
-		t.Errorf("origin = %q", clone.Origin)
+	if !s.createOpts.Parents || s.createOpts.Key != nil {
+		t.Errorf("opts = %+v", s.createOpts)
 	}
 }
 
-func TestGetBookmark(t *testing.T) {
-	c := newClient(newFake(t))
-	b, err := c.Get("tank/a#bm1")
+func TestCreateVolumeAndEncryption(t *testing.T) {
+	c, s := newStub()
+	key := PassphraseKey("correct horse battery")
+	if _, err := c.Dataset("tank").CreateVolume("swap", 4*GiB, WithVolBlockSize(16*KiB), WithEncryption(AES256GCM, key)); err != nil {
+		t.Fatal(err)
+	}
+	if s.last() != "CreateVolume tank/swap 4294967296" {
+		t.Errorf("call = %q", s.last())
+	}
+	if s.createOpts.Props["encryption"] != "aes-256-gcm" || s.createOpts.Props["volblocksize"] != 16*KiB || s.createOpts.Key != key {
+		t.Errorf("opts = %+v", s.createOpts)
+	}
+}
+
+func TestSetInheritDestroyRename(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/a")
+	if err := d.Set(WithCompression(LZ4), WithAtime(false)); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.setProps, map[string]any{"compression": "lz4", "atime": false}) {
+		t.Errorf("props = %v", s.setProps)
+	}
+	if err := d.Inherit("compression", "atime"); err != nil || strings.Join(s.calls[len(s.calls)-2:], "|") != "InheritProp tank/a compression|InheritProp tank/a atime" {
+		t.Errorf("inherit: %v %v", err, s.calls)
+	}
+	if err := d.Destroy(Recursive()); err != nil || !s.destroyOpt.Recursive || s.last() != "Destroy tank/a" {
+		t.Errorf("destroy: %v %+v", err, s.destroyOpt)
+	}
+	if err := d.Destroy(); err != nil || s.destroyOpt.Recursive {
+		t.Errorf("plain destroy: %+v", s.destroyOpt)
+	}
+	n, err := d.Rename("tank/b/a")
+	if err != nil || n.Name() != "tank/b/a" || s.last() != "Rename tank/a tank/b/a false" {
+		t.Errorf("rename: %v %v %q", n, err, s.last())
+	}
+	if err := d.Promote(); err != nil || s.last() != "Promote tank/a" {
+		t.Errorf("promote: %v", err)
+	}
+}
+
+func TestSnapshotLifecycleMapping(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/a")
+	snap, err := d.Snapshot("one", WithProp("note:why", "backup"))
+	if err != nil || snap.Name() != "tank/a@one" || !reflect.DeepEqual(s.snapNames, []string{"tank/a@one"}) || s.snapProps["note:why"] != "backup" {
+		t.Fatalf("snapshot: %v %v %v", snap, err, s.snapNames)
+	}
+	if err := snap.Hold("keep"); err != nil || s.last() != "Hold keep [tank/a@one]" {
+		t.Errorf("hold: %q", s.last())
+	}
+	if err := snap.Release("keep"); err != nil || s.last() != "Release keep [tank/a@one]" {
+		t.Errorf("release: %q", s.last())
+	}
+	if err := snap.Destroy(Deferred()); err != nil || !s.destroyOpt.Defer || s.last() != "Destroy tank/a@one" {
+		t.Errorf("destroy: %+v", s.destroyOpt)
+	}
+	if err := snap.Rollback(); err != nil || s.last() != "Rollback tank/a tank/a@one" {
+		t.Errorf("rollback: %q", s.last())
+	}
+	clone, err := snap.Clone("tank/clone", WithCompression(LZ4), Parents())
+	if err != nil || clone.Name() != "tank/clone" || s.last() != "Clone tank/clone tank/a@one" || s.createOpts.Props["compression"] != "lz4" || !s.createOpts.Parents {
+		t.Errorf("clone: %v %q %+v", err, s.last(), s.createOpts)
+	}
+	bm, err := snap.Bookmark("bm")
+	if err != nil || bm.Name() != "tank/a#bm" || s.last() != "CreateBookmark tank/a#bm tank/a@one" {
+		t.Errorf("bookmark: %v %q", err, s.last())
+	}
+	s.space = primitives.Space{Written: 42}
+	sp, err := snap.WrittenSince(bm)
+	if err != nil || sp.Written != 42 || s.last() != "SpaceWritten tank/a@one tank/a#bm" {
+		t.Errorf("written: %+v %v %q", sp, err, s.last())
+	}
+	if err := bm.Destroy(); err != nil || s.last() != "Destroy tank/a#bm" {
+		t.Errorf("destroy bookmark: %q", s.last())
+	}
+}
+
+func TestSnapshotAllTakesTheWholeTreeAtOnce(t *testing.T) {
+	c, s := newStub()
+	s.tree = []*primitives.Dataset{ds("tank/a", primitives.Filesystem, nil), ds("tank/a/b", primitives.Filesystem, nil), ds("tank/a/v", primitives.Volume, nil)}
+	snaps, err := c.Dataset("tank/a").SnapshotAll(context.Background(), "nightly")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Type != Bookmark || b.GUID != 7001 || b.CreationTxg != 17 || b.Name != "tank/a#bm1" {
-		t.Errorf("%+v", b)
-	}
-	if _, err := c.Get("tank/a#nope"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("missing bookmark: %v", err)
-	}
-}
-
-func TestGetPropertyFilter(t *testing.T) {
-	c := newClient(newFake(t))
-	d, err := c.Get("tank/a", "used", "mountpoint", "doesnotexist")
-	if err != nil || len(d.Props) != 2 || d.Props["used"].Value != uint64(1000) {
-		t.Errorf("%+v, %v", d, err)
-	}
-}
-
-func TestMissingAndExists(t *testing.T) {
-	k := newFake(t)
-	c := newClient(k)
-	if _, err := c.Get("tank/missing"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Get: %v", err)
-	}
-	for name, want := range map[string]bool{
-		"tank": true, "tank/a": true, "tank/a@s1": true, "tank/a#bm1": true,
-		"tank/missing": false, "tank/a@nope": false, "tank/a#nope": false,
-	} {
-		if got, err := c.Exists(name); err != nil || got != want {
-			t.Errorf("Exists(%q) = %v, %v; want %v", name, got, err, want)
-		}
-	}
-	k.hook = func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error {
-		if ioc == ioctl.IOCObjsetStats && cmd.GetName() == "tank/broken" {
-			return &ioctl.Error{Ioc: ioc, Errno: syscall.EIO}
-		}
-		return nil
-	}
-	if ok, err := c.Exists("tank/broken"); ok || !errors.Is(err, syscall.EIO) {
-		t.Errorf("other errors must surface, not read as \"missing\": %v, %v", ok, err)
-	}
-}
-
-func TestListDefaultTypesAndOrder(t *testing.T) {
-	c := newClient(newFake(t))
-	got, err := c.List("tank", ListOptions{Depth: Unlimited})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"tank", "tank/a", "tank/a/child", "tank/clone", "tank/vol", "tank/z"}
-	if !reflect.DeepEqual(names(got), want) {
-		t.Errorf("order = %v\nwant    %v", names(got), want)
-	}
-	if got[4].Type != Volume {
-		t.Error("tank/vol must be a volume")
-	}
-}
-
-func TestListAllTypes(t *testing.T) {
-	c := newClient(newFake(t))
-	got, err := c.List("tank", ListOptions{Types: Filesystem | Volume | Snapshot | Bookmark, Depth: Unlimited})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"tank",
-		"tank/a", "tank/a@s1", "tank/a@s2", "tank/a@s3", "tank/a#bm1", "tank/a#bm2",
-		"tank/a/child",
-		"tank/clone",
-		"tank/vol", "tank/vol@v1",
-		"tank/z",
-	}
-	if !reflect.DeepEqual(names(got), want) {
-		t.Errorf("order = %v\nwant    %v", names(got), want)
-	}
-}
-
-func TestListDepth(t *testing.T) {
-	c := newClient(newFake(t))
-	for depth, want := range map[int][]string{
-		0: {"tank"},
-		1: {"tank", "tank/a", "tank/clone", "tank/vol", "tank/z"},
-		2: {"tank", "tank/a", "tank/a/child", "tank/clone", "tank/vol", "tank/z"},
-	} {
-		got, err := c.List("tank", ListOptions{Depth: depth})
-		if err != nil || !reflect.DeepEqual(names(got), want) {
-			t.Errorf("depth %d: %v, %v; want %v", depth, names(got), err, want)
-		}
-	}
-	// A list of a sub-tree starts at its root.
-	got, _ := c.List("tank/a", ListOptions{Depth: Unlimited})
-	if !reflect.DeepEqual(names(got), []string{"tank/a", "tank/a/child"}) {
-		t.Errorf("sub-tree = %v", names(got))
-	}
-}
-
-func TestListSnapshotsOnlyWithTxgRange(t *testing.T) {
-	c := newClient(newFake(t))
-	all, _ := c.List("tank/a", ListOptions{Types: Snapshot})
-	if !reflect.DeepEqual(names(all), []string{"tank/a@s1", "tank/a@s2", "tank/a@s3"}) {
-		t.Errorf("snapshots by creation = %v", names(all))
-	}
-	got, err := c.List("tank/a", ListOptions{Types: Snapshot, MinTxg: 16, MaxTxg: 25})
-	if err != nil || !reflect.DeepEqual(names(got), []string{"tank/a@s2"}) {
-		t.Errorf("range = %v, %v", names(got), err)
-	}
-	if got[0].Type != Snapshot || got[0].GUID != 2020 {
-		t.Errorf("%+v", got[0])
-	}
-}
-
-func TestListSimpleSkipsProperties(t *testing.T) {
-	c := newClient(newFake(t))
-	got, err := c.List("tank", ListOptions{Depth: Unlimited, Simple: true, Types: Filesystem | Volume | Snapshot})
-	if err != nil || len(got) == 0 {
-		t.Fatal(err)
-	}
-	for _, d := range got {
-		if len(d.Props) != 0 {
-			t.Errorf("%s: simple listing returned %d properties", d.Name, len(d.Props))
-		}
-		if d.GUID == 0 || d.Type == 0 {
-			t.Errorf("%s: identity missing: %+v", d.Name, d)
-		}
-	}
-}
-
-func TestListMissingRootIsAnError(t *testing.T) {
-	c := newClient(newFake(t))
-	if _, err := c.List("tank/missing", ListOptions{}); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("err = %v", err)
-	}
-}
-
-func TestListRootThatIsASnapshotHasNoChildren(t *testing.T) {
-	c := newClient(newFake(t))
-	got, err := c.List("tank/a@s1", ListOptions{Types: Snapshot, Depth: Unlimited})
-	if err != nil || !reflect.DeepEqual(names(got), []string{"tank/a@s1"}) {
-		t.Errorf("%v, %v", names(got), err)
-	}
-}
-
-func TestListToleratesADatasetDestroyedDuringIteration(t *testing.T) {
-	k := newFake(t)
-	k.hook = func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error {
-		if ioc == ioctl.IOCDatasetListNext && cmd.GetName() == "tank" && cmd.Cookie != 0 {
-			return &ioctl.Error{Ioc: ioc, Name: cmd.GetName(), Errno: syscall.ENOENT}
-		}
-		return nil
-	}
-	got, err := newClient(k).List("tank", ListOptions{Depth: 1})
-	if err != nil || !reflect.DeepEqual(names(got), []string{"tank", "tank/z"}) {
-		t.Errorf("%v, %v: ENOENT mid-iteration ends the iteration", names(got), err)
-	}
-}
-
-func TestListSurfacesOtherErrors(t *testing.T) {
-	k := newFake(t)
-	k.hook = func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error {
-		if ioc == ioctl.IOCDatasetListNext {
-			return &ioctl.Error{Ioc: ioc, Errno: syscall.EIO}
-		}
-		return nil
-	}
-	if _, err := newClient(k).List("tank", ListOptions{Depth: 1}); !errors.Is(err, syscall.EIO) {
-		t.Errorf("err = %v", err)
-	}
-}
-
-func TestWalkStopsAtTheFirstCallbackError(t *testing.T) {
-	stop := errors.New("enough")
-	var seen []string
-	err := newClient(newFake(t)).Walk("tank", ListOptions{Depth: Unlimited}, func(d *Dataset) error {
-		seen = append(seen, d.Name)
-		if len(seen) == 2 {
-			return stop
-		}
-		return nil
-	})
-	if err != stop || !reflect.DeepEqual(seen, []string{"tank", "tank/a"}) {
-		t.Errorf("err %v, seen %v", err, seen)
-	}
-}
-
-// The cursor protocol is checked inside the fake: it fails the test if a
-// continued iteration names anything but the parent it was started for.
-func TestIterationNamesTheParentOnEveryCall(t *testing.T) {
-	k := newFake(t)
-	if _, err := newClient(k).List("tank", ListOptions{Types: Filesystem | Volume | Snapshot, Depth: Unlimited}); err != nil {
-		t.Fatal(err)
+	want := []string{"tank/a@nightly", "tank/a/b@nightly", "tank/a/v@nightly"}
+	if !reflect.DeepEqual(s.snapNames, want) || len(snaps) != 3 || snaps[2].Name() != want[2] {
+		t.Errorf("names = %v, handles = %v", s.snapNames, snaps)
 	}
 	n := 0
-	for _, c := range k.calls {
-		if c == "ZFS_IOC_DATASET_LIST_NEXT tank" {
+	for _, call := range s.calls {
+		if strings.HasPrefix(call, "Snapshot ") {
 			n++
 		}
 	}
-	if n != 5 { // four children, then ESRCH
-		t.Errorf("%d list-next calls for the pool's children, want 5: %v", n, k.calls)
+	if n != 1 {
+		t.Errorf("%d Snapshot calls, want one atomic call", n)
 	}
 }
 
-func TestHolds(t *testing.T) {
-	c := newClient(newFake(t))
-	holds, err := c.Holds("tank/a@s1")
-	if err != nil || len(holds) != 2 || holds[0].Tag != "keep" || holds[1].Tag != "other" ||
-		holds[0].Created.Unix() != 1700000100 {
-		t.Errorf("%+v, %v", holds, err)
+func TestOptionMisuseIsRefusedBeforeAnyCall(t *testing.T) {
+	c, s := newStub()
+	d, snap := c.Dataset("tank/a"), c.Snapshot("tank/a@x")
+	key := RawKey(make([]byte, 32))
+	ctx := context.Background()
+	cases := map[string]func() error{
+		"Parents to Set":          func() error { return d.Set(Parents()) },
+		"encryption to Set":       func() error { return d.Set(WithEncryption(AES256GCM, key)) },
+		"volblocksize to Set":     func() error { return d.Set(WithVolBlockSize(4096)) },
+		"Recursive to Create":     func() error { _, err := d.CreateFilesystem("x", Recursive()); return err },
+		"Deferred to dataset":     func() error { return d.Destroy(Deferred()) },
+		"Recursive to snapshot":   func() error { return snap.Destroy(Recursive()) },
+		"Compression to Snapshot": func() error { _, err := d.Snapshot("y", WithCompression(LZ4)); return err },
+		"Quota to Snapshot":       func() error { _, err := d.Snapshot("y", WithQuota(1)); return err },
+		"Depth to Create":         func() error { _, err := d.CreateVolume("v", 1, Depth(2)); return err },
+		"encryption to Clone":     func() error { _, err := snap.Clone("tank/c", WithEncryption(AES256GCM, key)); return err },
+		"Compression to SnapAll":  func() error { _, err := d.SnapshotAll(ctx, "z", WithCompression(LZ4)); return err },
+		"zero Option":             func() error { return d.Set(Option{}) },
 	}
-	if none, err := c.Holds("tank/a@s2"); err != nil || len(none) != 0 {
-		t.Errorf("no holds: %v, %v", none, err)
-	}
-	if _, err := c.Holds("tank/a@missing"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("missing snapshot: %v", err)
-	}
-}
-
-func TestBookmarksAcceptBothValueShapes(t *testing.T) {
-	for _, bare := range []bool{false, true} {
-		k := newFake(t)
-		k.bareBookmarkProps = bare
-		bms, err := newClient(k).Bookmarks("tank/a")
-		if err != nil || len(bms) != 2 {
-			t.Fatalf("bare=%v: %v, %v", bare, bms, err)
+	for name, f := range cases {
+		err := f()
+		if !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("%s: err = %v, want ErrInvalidOption", name, err)
 		}
-		// ordered by creation transaction, not by name or kernel order
-		if bms[0].Name != "tank/a#bm1" || bms[1].Name != "tank/a#bm2" {
-			t.Errorf("bare=%v: order %v", bare, names(bms))
-		}
-		if bms[0].GUID != 7001 || bms[0].CreationTxg != 17 || bms[0].Props["creation"].Value != uint64(1700000250) {
-			t.Errorf("bare=%v: %+v", bare, bms[0])
+		var oe *OpError
+		if !errors.As(err, &oe) {
+			t.Errorf("%s: not an *OpError: %v", name, err)
 		}
 	}
-	none, err := newClient(newFake(t)).Bookmarks("tank/z")
-	if err != nil || len(none) != 0 {
-		t.Errorf("no bookmarks: %v, %v", none, err)
+	for it, err := range d.Children(ctx, WithCompression(LZ4)) {
+		if it != nil || !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("listing with a property option: %v %v", it, err)
+		}
+	}
+	if len(s.calls) != 0 {
+		t.Errorf("calls were made: %v", s.calls)
 	}
 }
 
-func TestSpace(t *testing.T) {
-	c := newClient(newFake(t))
-	w, err := c.SpaceWritten("tank/a@s2", "tank/a@s1")
-	if err != nil || w != (Space{Written: 1000, Compressed: 500, Uncompressed: 2000}) {
-		t.Errorf("%+v, %v", w, err)
-	}
-	if _, err := c.SpaceWritten("tank/missing", "tank/a@s1"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("missing: %v", err)
-	}
-	r, err := c.SnapshotRangeSpace("tank/a@s1", "tank/a@s3")
-	if err != nil || r != (Space{Used: 4096, Compressed: 2048, Uncompressed: 8192}) {
-		t.Errorf("%+v, %v", r, err)
-	}
-	if _, err := c.SnapshotRangeSpace("tank/a@nope", "tank/a@s3"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("missing first snapshot: %v", err)
-	}
-}
-
-func TestPools(t *testing.T) {
-	k := newFake(t)
-	k.pools = []string{"zroot", "tank", "backup"}
-	got, err := newClient(k).Pools()
-	if err != nil || !reflect.DeepEqual(got, []string{"backup", "tank", "zroot"}) {
-		t.Errorf("%v, %v", got, err)
-	}
-}
-
-func TestTypeString(t *testing.T) {
-	for in, want := range map[Type]string{
-		Filesystem: "filesystem", Snapshot | Bookmark: "snapshot,bookmark", 0: "unknown",
-		Filesystem | Volume | Snapshot | Bookmark: "filesystem,volume,snapshot,bookmark",
+func TestErrorsClassify(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/a")
+	for _, tc := range []struct {
+		errno  syscall.Errno
+		target error
+	}{
+		{syscall.ENOENT, ErrNotFound}, {syscall.EEXIST, ErrExists}, {syscall.EBUSY, ErrBusy},
+		{syscall.EPERM, ErrPermission}, {syscall.EACCES, ErrPermission}, {syscall.ENOSPC, ErrNoSpace},
 	} {
-		if in.String() != want {
-			t.Errorf("%d = %q, want %q", in, in.String(), want)
+		s.err = &ioctl.Error{Ioc: ioctl.IOCDestroy, Name: "tank/a", Errno: tc.errno}
+		err := d.Destroy()
+		if !errors.Is(err, tc.target) {
+			t.Errorf("%v does not match %v: %v", tc.errno, tc.target, err)
+		}
+		var ie *ioctl.Error
+		var oe *OpError
+		if !errors.As(err, &ie) || !errors.As(err, &oe) || oe.Op != "destroy" || oe.Name != "tank/a" {
+			t.Errorf("error chain broken: %v", err)
 		}
 	}
-}
-
-func TestCloseWithoutConnection(t *testing.T) {
-	if err := newClient(newFake(t)).Close(); err != nil {
-		t.Error(err)
+	if !errors.Is(&OpError{Err: syscall.ENOENT}, fs.ErrNotExist) {
+		t.Error("ErrNotFound is not fs.ErrNotExist")
+	}
+	s.err = nil
+	if err := d.Set(WithQuota(1)); err != nil {
+		t.Errorf("success wrapped as error: %v", err)
 	}
 }
 
-func TestClones(t *testing.T) {
-	c := newClient(newFake(t))
-	s1, err := c.Get("tank/a@s1")
-	if err != nil || !reflect.DeepEqual(s1.Clones(), []string{"tank/clone"}) {
-		t.Errorf("%v, %v", s1.Clones(), err)
+func TestKeyErrorsCarryErrKey(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/enc")
+	key := PassphraseKey("long enough!")
+	if err := d.LoadKey(key); err != nil || s.key != key {
+		t.Fatalf("LoadKey: %v", err)
 	}
-	s2, _ := c.Get("tank/a@s2")
-	if s2.Clones() != nil {
-		t.Errorf("a snapshot without clones: %v", s2.Clones())
-	}
-}
-
-// The kernel stores an inherited mountpoint as the ancestor's value; the
-// effective one needs the rest of the name appended, as zfs get does.
-func TestMountpointIsTheEffectiveOne(t *testing.T) {
-	mp := func(name, value, source string) string {
-		d := &Dataset{Name: name, Props: map[string]Property{"mountpoint": {Value: value, Source: source}}}
-		return d.Mountpoint()
-	}
-	for _, c := range []struct{ name, value, source, want string }{
-		{"p/a", "/data", "p/a", "/data"},         // local
-		{"p/a/b", "/data", "p/a", "/data/b"},     // inherited
-		{"p/a/b/c", "/data", "p/a", "/data/b/c"}, // inherited, two levels
-		{"p/a/b", "/", "p/a", "/b"},              // inherited from a dataset mounted at /
-		{"p/a/b", "none", "p/a", "none"},         // none and legacy never get a suffix
-		{"p/a/b", "legacy", "p/a", "legacy"},
-		{"p/a", "/p/a", "", "/p/a"},       // default
-		{"p/a/b", "/x", "$recvd", "/x"},   // received values are as stored
-		{"p/ab", "/data", "p/a", "/data"}, // a prefix of the name that is not a parent
+	for name, f := range map[string]func() error{
+		"load": func() error { return d.LoadKey(key) }, "check": func() error { return d.CheckKey(key) },
+		"unload": d.UnloadKey, "change": func() error { return d.ChangeKey(key) }, "inherit": d.InheritKey,
 	} {
-		if got := mp(c.name, c.value, c.source); got != c.want {
-			t.Errorf("Mountpoint(%s, %q from %q) = %q, want %q", c.name, c.value, c.source, got, c.want)
+		s.err = &ioctl.Error{Name: "tank/enc", Errno: syscall.EACCES}
+		err := f()
+		if !errors.Is(err, ErrKey) || !errors.Is(err, syscall.EACCES) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if (&Dataset{Name: "p/vol"}).Mountpoint() != "" {
-		t.Error("a dataset without the property has no mountpoint")
+}
+
+func TestInfoReadsTypedFields(t *testing.T) {
+	c, s := newStub()
+	s.get = ds("tank/enc", primitives.Filesystem, map[string]primitives.Property{
+		"used": {Value: uint64(1000)}, "available": {Value: uint64(9000)}, "referenced": {Value: uint64(500)},
+		"creation": {Value: uint64(1700000000)}, "quota": {Value: uint64(10 << 30), Source: "tank/enc"},
+		"compression": {Value: uint64(15), Source: "tank"}, "checksum": {Value: uint64(13)},
+		"mountpoint": {Value: "/tank/enc", Source: "default"}, "recordsize": {Value: uint64(131072)},
+		"readonly": {Value: uint64(0)}, "atime": {Value: uint64(1)},
+		"encryption": {Value: uint64(8)}, "keystatus": {Value: uint64(2)}, "encryptionroot": {Value: "tank/enc"},
+		"compressratio": {Value: uint64(150)}, "note:x": {Value: "hi"},
+	})
+	info, err := c.Dataset("tank/enc").Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"Used": uint64(1000), "Available": uint64(9000), "Quota": uint64(10 << 30), "RecordSize": uint64(131072),
+		"Compression": LZ4, "Checksum": Edonr, "Encryption": AES256GCM, "KeyStatus": KeyAvailable,
+		"EncryptionRoot": "tank/enc", "Mountpoint": "/tank/enc", "Atime": true, "ReadOnly": false, "Kind": KindFilesystem,
+	}
+	rv := reflect.ValueOf(info).Elem()
+	for f, w := range want {
+		if got := rv.FieldByName(f).Interface(); got != w {
+			t.Errorf("%s = %#v, want %#v", f, got, w)
+		}
+	}
+	if !info.Encrypted() || !info.Created.Equal(time.Unix(1700000000, 0)) || info.CompressRatio != 1.5 {
+		t.Errorf("Encrypted=%v Created=%v ratio=%v", info.Encrypted(), info.Created, info.CompressRatio)
+	}
+	if v, ok := info.Prop("note:x"); !ok || v != "hi" {
+		t.Errorf("Prop = %v %v", v, ok)
+	}
+	if info.Dataset().Name() != "tank/enc" || info.Raw() == nil {
+		t.Error("handles from Info")
+	}
+
+	// A snapshot has no filesystem settings.
+	s.get = ds("tank/enc@s", primitives.Snapshot, map[string]primitives.Property{"used": {Value: uint64(5)}, "creation": {Value: uint64(1700000001)}})
+	si, err := c.Snapshot("tank/enc@s").Info()
+	if err != nil || si.Used != 5 || si.Compression != "" || si.Encrypted() || si.Snapshot().Name() != "tank/enc@s" {
+		t.Errorf("snapshot info: %+v %v", si, err)
 	}
 }
+
+func TestIterationSkipsRootStopsOnBreakAndContext(t *testing.T) {
+	c, s := newStub()
+	s.tree = []*primitives.Dataset{ds("tank/a", primitives.Filesystem, nil), ds("tank/a/b", primitives.Filesystem, nil), ds("tank/a/c", primitives.Volume, nil)}
+	d := c.Dataset("tank/a")
+
+	var got []string
+	for in, err := range d.Descendants(context.Background()) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, in.Name)
+	}
+	if !reflect.DeepEqual(got, []string{"tank/a/b", "tank/a/c"}) {
+		t.Errorf("descendants = %v (the root must not be included)", got)
+	}
+	if !strings.Contains(strings.Join(s.calls, "|"), "Walk tank/a types=filesystem,volume depth=") {
+		t.Errorf("walk call = %v", s.calls)
+	}
+
+	s.walked = 0
+	for range d.Descendants(context.Background()) {
+		break
+	}
+	if s.walked > 2 {
+		t.Errorf("the walk went on after break: %d datasets visited", s.walked)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n, sawErr := 0, error(nil)
+	for _, err := range d.Descendants(ctx) {
+		if err != nil {
+			sawErr = err
+			break
+		}
+		n++
+		cancel()
+	}
+	if n != 1 || !errors.Is(sawErr, context.Canceled) {
+		t.Errorf("after cancel: %d items, err %v", n, sawErr)
+	}
+
+	s.calls = nil
+	for range d.Children(context.Background(), OnlyKinds(KindVolume)) {
+	}
+	if got := s.calls[0]; got != "Walk tank/a types=volume depth=1" {
+		t.Errorf("children call = %q", got)
+	}
+	s.calls = nil
+	for range d.Snapshots(context.Background()) {
+	}
+	if got := s.calls[0]; got != "Walk tank/a types=snapshot depth=0" {
+		t.Errorf("snapshots call = %q", got)
+	}
+
+	s.err = &ioctl.Error{Errno: syscall.ENOENT, Name: "tank/a"}
+	errs := 0
+	for _, err := range d.Descendants(context.Background()) {
+		if errors.Is(err, ErrNotFound) {
+			errs++
+		}
+	}
+	if errs != 1 {
+		t.Errorf("a failing walk reported %d errors, want 1", errs)
+	}
+}
+
+// Every typed constant must be a value the property table knows, or the
+// kernel call it leads to would be refused.
+func TestTypedConstantsAreInTheTable(t *testing.T) {
+	check := func(prop string, values ...string) {
+		t.Helper()
+		info, ok := primitives.LookupProp(prop)
+		if !ok {
+			t.Fatalf("%s is not in the table", prop)
+		}
+		known := map[string]bool{}
+		for _, v := range info.Values {
+			known[v.Name] = true
+		}
+		for _, v := range values {
+			if !known[v] {
+				t.Errorf("%s=%s is not a value of the property", prop, v)
+			}
+		}
+	}
+	comp := []Compression{CompressionOn, CompressionOff, LZJB, LZ4, ZLE, GZIP, ZSTD}
+	for n := 1; n <= 9; n++ {
+		comp = append(comp, GZIPLevel(n))
+	}
+	for n := 1; n <= 19; n++ {
+		comp = append(comp, ZSTDLevel(n))
+	}
+	var names []string
+	for _, v := range comp {
+		names = append(names, string(v))
+	}
+	check("compression", names...)
+	check("checksum", string(ChecksumOn), string(ChecksumOff), string(Fletcher2), string(Fletcher4), string(SHA256), string(SHA512), string(Skein), string(Edonr), string(Blake3), string(NoParity))
+	check("sync", string(SyncStandard), string(SyncAlways), string(SyncDisabled))
+	check("encryption", string(EncryptionOff), string(EncryptionOn), string(AES128CCM), string(AES192CCM), string(AES256CCM), string(AES128GCM), string(AES192GCM), string(AES256GCM))
+	check("keystatus", string(KeyNone), string(KeyUnavailable), string(KeyAvailable))
+	if GZIPLevel(6) != GZIP || GIB() != 1<<30 || PiB != 1<<50 {
+		t.Error("constants")
+	}
+}
+
+func GIB() uint64 { return GiB }
