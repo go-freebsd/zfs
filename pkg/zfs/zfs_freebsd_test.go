@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-freebsd/nvlist/pkg/nvlist"
 	"github.com/go-freebsd/zfs/pkg/ioctl"
 )
 
@@ -273,6 +274,7 @@ func TestMissingAndExistsOnARealKernel(t *testing.T) {
 // Compares every property the kernel returns with "zfs get -Hp all".
 func TestPropertiesMatchZfsGet(t *testing.T) {
 	c, pool := testClient(t)
+	totalStrs := 0
 	for _, name := range []string{
 		pool, pool + "/a", pool + "/a/b", pool + "/a/b/c", pool + "/vol", pool + "/clone",
 		pool + "/a@s1", pool + "/a/b@r1", pool + "/vol@v1",
@@ -286,10 +288,14 @@ func TestPropertiesMatchZfsGet(t *testing.T) {
 		for _, m := range mismatches {
 			t.Errorf("%s: %s", name, m)
 		}
-		t.Logf("%s: %d numeric and %d string properties equal, %d enumerated skipped", name, numeric, strs, skipped)
-		if numeric < 8 || strs < 1 {
+		t.Logf("%s: %d numeric and %d string properties equal, %d not comparable", name, numeric, strs, skipped)
+		if numeric < 8 || numeric+strs < 10 {
 			t.Errorf("%s: only %d numeric / %d string properties were compared: the test would pass vacuously", name, numeric, strs)
 		}
+		totalStrs += strs
+	}
+	if totalStrs < 5 {
+		t.Errorf("only %d string properties were compared in total", totalStrs)
 	}
 }
 
@@ -317,6 +323,15 @@ func compareProps(t *testing.T, d *Dataset) (numeric, strs, skipped int, mismatc
 		if !ok {
 			continue // computed by libzfs, or not returned for this kind
 		}
+		inherited := ours.Source != "" && ours.Source != d.Name && ours.Source != "$recvd"
+		if prop == "mountpoint" && inherited {
+			skipped++ // the kernel stores the ancestor's value; Mountpoint() is checked separately
+			continue
+		}
+		if _, isList := ours.Value.(*nvlist.List); isList {
+			skipped++ // clones: a list of names, checked separately
+			continue
+		}
 		switch v := ours.Value.(type) {
 		case uint64:
 			if !isDigits(val) {
@@ -338,6 +353,9 @@ func compareProps(t *testing.T, d *Dataset) (numeric, strs, skipped int, mismatc
 		default:
 			mismatches = append(mismatches, prop+": unexpected value type")
 			continue
+		}
+		if prop == "volsize" || prop == "volblocksize" {
+			continue // the kernel reports no source for these; zfs get says "local"
 		}
 		var wantSrc []string
 		switch {
@@ -501,5 +519,37 @@ func TestSpaceMatchesZfs(t *testing.T) {
 	}
 	if strconv.FormatUint(r.Used, 10) != reclaim {
 		t.Errorf("SnapshotRangeSpace = %+v, zfs destroy -nvp reclaim = %s", r, reclaim)
+	}
+}
+
+func TestMountpointAndClonesMatchZfsGet(t *testing.T) {
+	c, pool := testClient(t)
+	for _, name := range []string{pool, pool + "/a", pool + "/a/b", pool + "/a/b/c", pool + "/clone", pool + "/big", pool + "/many/d7"} {
+		d, err := c.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.TrimSpace(cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", name))
+		if d.Mountpoint() != want {
+			t.Errorf("%s: Mountpoint() = %q, zfs get mountpoint = %q", name, d.Mountpoint(), want)
+		}
+	}
+	// The interesting cases are really in the fixtures.
+	b, _ := c.Get(pool + "/a/b/c")
+	if b.Mountpoint() != "/fixture_a/b/c" {
+		t.Errorf("inherited mountpoint = %q, want /fixture_a/b/c", b.Mountpoint())
+	}
+
+	s1, err := c.Get(pool + "/a@s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimSpace(cli(t, "zfs", "get", "-H", "-o", "value", "clones", pool+"/a@s1"))
+	if got := strings.Join(s1.Clones(), ","); got != want || want != pool+"/clone" {
+		t.Errorf("Clones() = %v, zfs get clones = %q", s1.Clones(), want)
+	}
+	cl, _ := c.Get(pool + "/clone")
+	if cl.Origin != pool+"/a@s1" {
+		t.Errorf("origin = %q", cl.Origin)
 	}
 }

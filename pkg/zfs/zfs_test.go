@@ -347,3 +347,42 @@ func TestCloseWithoutConnection(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestClones(t *testing.T) {
+	c := newClient(newFake(t))
+	s1, err := c.Get("tank/a@s1")
+	if err != nil || !reflect.DeepEqual(s1.Clones(), []string{"tank/clone"}) {
+		t.Errorf("%v, %v", s1.Clones(), err)
+	}
+	s2, _ := c.Get("tank/a@s2")
+	if s2.Clones() != nil {
+		t.Errorf("a snapshot without clones: %v", s2.Clones())
+	}
+}
+
+// The kernel stores an inherited mountpoint as the ancestor's value; the
+// effective one needs the rest of the name appended, as zfs get does.
+func TestMountpointIsTheEffectiveOne(t *testing.T) {
+	mp := func(name, value, source string) string {
+		d := &Dataset{Name: name, Props: map[string]Property{"mountpoint": {Value: value, Source: source}}}
+		return d.Mountpoint()
+	}
+	for _, c := range []struct{ name, value, source, want string }{
+		{"p/a", "/data", "p/a", "/data"},         // local
+		{"p/a/b", "/data", "p/a", "/data/b"},     // inherited
+		{"p/a/b/c", "/data", "p/a", "/data/b/c"}, // inherited, two levels
+		{"p/a/b", "/", "p/a", "/b"},              // inherited from a dataset mounted at /
+		{"p/a/b", "none", "p/a", "none"},         // none and legacy never get a suffix
+		{"p/a/b", "legacy", "p/a", "legacy"},
+		{"p/a", "/p/a", "", "/p/a"},       // default
+		{"p/a/b", "/x", "$recvd", "/x"},   // received values are as stored
+		{"p/ab", "/data", "p/a", "/data"}, // a prefix of the name that is not a parent
+	} {
+		if got := mp(c.name, c.value, c.source); got != c.want {
+			t.Errorf("Mountpoint(%s, %q from %q) = %q, want %q", c.name, c.value, c.source, got, c.want)
+		}
+	}
+	if (&Dataset{Name: "p/vol"}).Mountpoint() != "" {
+		t.Error("a dataset without the property has no mountpoint")
+	}
+}

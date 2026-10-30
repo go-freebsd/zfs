@@ -1,8 +1,11 @@
 package zfs
 
 import (
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-freebsd/nvlist/pkg/nvlist"
 )
 
 // Type is a kind of dataset. It is also used as a bit mask to select
@@ -34,7 +37,8 @@ func (t Type) String() string {
 
 // Property is one property of a dataset as the kernel reports it.
 type Property struct {
-	// Value is a uint64 or a string. Enumerated properties are numbers.
+	// Value is a uint64 or a string; enumerated properties are numbers. The
+	// "clones" property is a *nvlist.List of dataset names (see Clones).
 	Value any `nvlist:"value"`
 	// Source is the dataset the value is set on ("" for the default, the
 	// dataset's own name for a local value, "$recvd" for a received one).
@@ -77,8 +81,32 @@ func (d *Dataset) LogicalUsed() uint64 { return d.num("logicalused") }
 func (d *Dataset) Quota() uint64       { return d.num("quota") }
 func (d *Dataset) Reservation() uint64 { return d.num("reservation") }
 
-// Mountpoint returns the mountpoint property ("none", "legacy" or a path).
-func (d *Dataset) Mountpoint() string { s, _ := d.String("mountpoint"); return s }
+// Mountpoint returns the effective mountpoint ("none", "legacy" or a path).
+// The kernel stores an inherited mountpoint as the value of the ancestor it
+// was set on; like zfs get, this appends the part of the name below that
+// ancestor.
+func (d *Dataset) Mountpoint() string {
+	p := d.Props["mountpoint"]
+	v, _ := p.Value.(string)
+	if !strings.HasPrefix(v, "/") || p.Source == "" || p.Source == "$recvd" || p.Source == d.Name {
+		return v
+	}
+	if suffix, ok := strings.CutPrefix(d.Name, p.Source); ok && strings.HasPrefix(suffix, "/") {
+		return strings.TrimSuffix(v, "/") + suffix
+	}
+	return v
+}
+
+// Clones returns the names of the datasets cloned from this snapshot, sorted.
+func (d *Dataset) Clones() []string {
+	l, ok := d.Props["clones"].Value.(*nvlist.List)
+	if !ok {
+		return nil
+	}
+	names := l.Names()
+	sort.Strings(names)
+	return names
+}
 
 // Creation returns the creation time property.
 func (d *Dataset) Creation() time.Time {

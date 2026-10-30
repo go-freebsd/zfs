@@ -97,6 +97,9 @@ func newFake(t *testing.T) *fakeKernel {
 	s1.holds = map[string]uint64{"keep": 1700000100, "other": 1700000200}
 	clone.origin = "tank/a@s1"
 	s1.clones = 1
+	cl := nvlist.New()
+	cl.Add("tank/clone", nvlist.Flag{})
+	s1.props["clones"] = Property{Value: cl}
 	a.bookmarks = []fakeBookmark{{"bm2", 7002, 25, 1700000300}, {"bm1", 7001, 17, 1700000250}}
 	k.snap("tank/vol", "v1", 16)
 	return k
