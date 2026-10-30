@@ -56,6 +56,8 @@ var propTable = []PropInfo{
 	boolProp("nbmand", tFS, "off"),
 	boolProp("vscan", tFS, "off"),
 	boolProp("overlay", tFS, "on"),
+	boolProp("volthreading", tVol, "on"), // FreeBSD 15
+	PropInfo{Name: "longname", Kind: KindBool, Values: onOff, CreateOnly: true, Types: tFS}.withDefault("off"), // FreeBSD 15
 	PropInfo{Name: "utf8only", Kind: KindBool, Values: onOff, CreateOnly: true, Types: tFS}.withDefault("off"),
 	{Name: "mounted", Kind: KindBool, Values: noYes, ReadOnly: true, Types: tFS},
 	{Name: "defer_destroy", Kind: KindBool, Values: onOff, ReadOnly: true, Types: tSnap},
@@ -78,6 +80,8 @@ var propTable = []PropInfo{
 	enumProp("dnodesize", tFS, "legacy", vals("legacy", 0, "auto", 1, "1k", 1024, "2k", 2048, "4k", 4096, "8k", 8192, "16k", 16384)),
 	enumProp("logbias", tFV, "latency", vals("latency", 0, "throughput", 1)),
 	enumProp("primarycache", tFV, "all", vals("none", 0, "metadata", 1, "all", 2)),
+	enumProp("prefetch", tFV, "all", vals("none", 0, "metadata", 1, "all", 2)),
+	enumProp("direct", tFV, "standard", vals("disabled", 0, "standard", 1, "always", 2)), // OpenZFS 2.3 / FreeBSD 15`
 	enumProp("secondarycache", tFV, "all", vals("none", 0, "metadata", 1, "all", 2)),
 	enumProp("redundant_metadata", tFV, "all", vals("all", 0, "most", 1, "some", 2, "none", 3)),
 	enumProp("snapdev", tFV, "hidden", vals("hidden", 0, "visible", 1)),
@@ -137,6 +141,10 @@ var propTable = []PropInfo{
 	PropInfo{Name: "sharenfs", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("off"),
 	PropInfo{Name: "sharesmb", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("off"),
 	PropInfo{Name: "mlslabel", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("none"),
+	PropInfo{Name: "context", Kind: KindString, Types: tFS}.withDefaultStr("none"),
+	PropInfo{Name: "fscontext", Kind: KindString, Types: tFS}.withDefaultStr("none"),
+	PropInfo{Name: "defcontext", Kind: KindString, Types: tFS}.withDefaultStr("none"),
+	PropInfo{Name: "rootcontext", Kind: KindString, Types: tFS}.withDefaultStr("none"),
 	PropInfo{Name: "keylocation", Kind: KindString, Types: tFV}.withDefaultStr("none"),
 	{Name: "origin", Kind: KindString, ReadOnly: true, Types: tFV},
 	{Name: "encryptionroot", Kind: KindString, ReadOnly: true, Types: tFV},

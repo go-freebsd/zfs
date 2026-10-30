@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -138,6 +139,15 @@ func TestDefaultsMatchZfsGet(t *testing.T) {
 			if !have {
 				t.Errorf("%s: no default in the table for %s %s: zfs get says %q", name, info.Kind, prop, want)
 				continue
+			}
+			// zfs get prints "none" even with -p for a number that means "no limit".
+			if want == "none" {
+				switch info.None {
+				case NoneIsZero:
+					want = "0"
+				case NoneIsMax:
+					want = strconv.FormatUint(math.MaxUint64, 10)
+				}
 			}
 			var got string
 			switch x := v.(type) {
