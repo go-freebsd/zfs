@@ -513,6 +513,7 @@ func TestScenarioSendReceive(t *testing.T) {
 	if err != nil || h.ToName != a.Name() || h.Incremental() {
 		t.Fatalf("header %+v %v", h, err)
 	}
+	fullBytes := append([]byte(nil), full.Bytes()...) // Receive drains the buffer
 	dst := pool.Child("sr_dst")
 	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
 	got, err := dst.Receive(ctx, &full, WithMountpoint("none"), WithProp("note:from", "src"))
@@ -528,7 +529,7 @@ func TestScenarioSendReceive(t *testing.T) {
 		}
 	}
 	check(t, dst.Name(), map[string]string{"note:from": "src", "mountpoint": "none"})
-	if _, err := dst.Receive(ctx, bytes.NewReader(full.Bytes())); !errors.Is(err, ErrExists) {
+	if _, err := dst.Receive(ctx, bytes.NewReader(fullBytes)); !errors.Is(err, ErrExists) {
 		t.Errorf("full stream into an existing dataset: %v", err)
 	}
 
