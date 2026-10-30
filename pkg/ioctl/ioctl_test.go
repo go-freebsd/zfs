@@ -350,3 +350,61 @@ func TestTraceSeesPackedLists(t *testing.T) {
 		t.Errorf("trace saw %q %x %x", gotName, gotSrc, gotDst)
 	}
 }
+
+// The list ioctls advance zc_cookie and rewrite zc_name even when the reply
+// did not fit. A retry must repeat the original request or an entry is lost.
+func TestRetryRepeatsTheOriginalRequest(t *testing.T) {
+	for name, firstAttempt := range map[string]func(cmd *Cmd) error{
+		"buffer too small, reported as success": func(cmd *Cmd) error { cmd.NvlistDstSize = 500_000; return nil },
+		"ENOMEM":                                func(cmd *Cmd) error { return syscall.ENOMEM },
+		"EINTR":                                 func(cmd *Cmd) error { return syscall.EINTR },
+	} {
+		want := listOf(t, "k", "v")
+		attempts := 0
+		c := newConn(func(ioc IOC, cmd *Cmd, b *buffers) error {
+			attempts++
+			if cmd.Cookie != 7 || cmd.Obj != 3 || cmd.GetName() != "tank/fs" {
+				t.Errorf("%s: attempt %d sees cookie %d, obj %d, name %q; want 7, 3, tank/fs",
+					name, attempts, cmd.Cookie, cmd.Obj, cmd.GetName())
+			}
+			// What the kernel does while serving the call.
+			cmd.Cookie++
+			cmd.Obj += 10
+			cmd.SetName("tank/fs/child")
+			if attempts == 1 {
+				return firstAttempt(cmd)
+			}
+			reply(t, cmd, b, want)
+			return nil
+		})
+		cmd := NewCmd()
+		cmd.SetName("tank/fs")
+		cmd.Cookie, cmd.Obj = 7, 3
+		out, err := c.Do(IOCDatasetListNext, cmd, nil)
+		if err != nil || !reflect.DeepEqual(out, want) || attempts != 2 {
+			t.Fatalf("%s: out %v, err %v, attempts %d", name, out, err, attempts)
+		}
+		if cmd.Cookie != 8 || cmd.Obj != 13 || cmd.GetName() != "tank/fs/child" {
+			t.Errorf("%s: final cursor %d/%d name %q: must be advanced once by the successful attempt only",
+				name, cmd.Cookie, cmd.Obj, cmd.GetName())
+		}
+	}
+}
+
+func TestEINTRIsRepeatedForBothCallStyles(t *testing.T) {
+	calls := 0
+	c := newConn(func(ioc IOC, cmd *Cmd, b *buffers) error {
+		calls++
+		if calls <= 2 {
+			return syscall.EINTR
+		}
+		return nil
+	})
+	if _, err := c.Call(IOCObjsetStats, "tank", nil); err != nil || calls != 3 {
+		t.Errorf("Do: err %v after %d calls", err, calls)
+	}
+	calls = 0
+	if err := c.Ioctl(IOCRollback, NewCmd()); err != nil || calls != 3 {
+		t.Errorf("Ioctl: err %v after %d calls", err, calls)
+	}
+}

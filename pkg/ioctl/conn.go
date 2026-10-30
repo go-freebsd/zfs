@@ -62,7 +62,9 @@ func (c *Conn) FD() int { return c.fd }
 
 // Do runs one ioctl with cmd. in, if not nil, is packed into the source
 // nvlist. The destination buffer starts at 128 KiB and doubles whenever the
-// kernel reports ENOMEM or a larger required size, as libzfs_core does. The
+// kernel reports ENOMEM or a larger required size, as libzfs_core does. An
+// interrupted call (EINTR) is repeated. Every attempt starts from the Cmd as
+// the caller left it, so cursor based ioctls are not advanced twice. The
 // output list is returned if the kernel produced one.
 //
 // cmd must come from NewCmd. Its Name must be set by the caller; Do sets
@@ -77,8 +79,15 @@ func (c *Conn) Do(ioc IOC, cmd *Cmd, in *nvlist.List) (*nvlist.List, error) {
 	}
 	cmd.NvlistSrc, cmd.NvlistSrcSize = ptr(src), uint64(len(src))
 
+	// Every attempt repeats the same request. The list ioctls advance the
+	// cursor (zc_cookie, zc_obj) and rewrite zc_name even when the reply did
+	// not fit, so retrying with the modified Cmd would skip an entry; libzfs
+	// restores the cookie for the same reason.
+	orig := *cmd
+
 	size := max(2*len(src), minDstSize)
 	for {
+		*cmd = orig
 		dst := make([]byte, size)
 		cmd.NvlistDst, cmd.NvlistDstSize, cmd.NvlistDstFilled = ptr(dst), uint64(size), 0
 
@@ -88,6 +97,9 @@ func (c *Conn) Do(ioc IOC, cmd *Cmd, in *nvlist.List) (*nvlist.List, error) {
 
 		// On FreeBSD a too small buffer is not an error: the kernel returns
 		// success with the size it needs in zc_nvlist_dst_size.
+		if errors.Is(err, syscall.EINTR) {
+			continue // a signal (Go uses SIGURG for preemption) interrupted the call
+		}
 		grew := err == nil && cmd.NvlistDstSize > uint64(size)
 		if grew || errors.Is(err, syscall.ENOMEM) {
 			next := size * 2
@@ -131,10 +143,18 @@ func (c *Conn) Call(ioc IOC, name string, in *nvlist.List) (*nvlist.List, error)
 // nvlist buffers.
 func (c *Conn) Ioctl(ioc IOC, cmd *Cmd) error {
 	cmd.NvlistSrc, cmd.NvlistSrcSize, cmd.NvlistDst, cmd.NvlistDstSize = 0, 0, 0, 0
-	if err := c.do(ioc, cmd, &buffers{}); err != nil {
-		return c.wrap(ioc, cmd, err)
+	orig := *cmd
+	for {
+		*cmd = orig
+		err := c.do(ioc, cmd, &buffers{})
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return c.wrap(ioc, cmd, err)
+		}
+		return nil
 	}
-	return nil
 }
 
 func (c *Conn) wrap(ioc IOC, cmd *Cmd, err error) error {
