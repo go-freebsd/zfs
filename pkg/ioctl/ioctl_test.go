@@ -435,3 +435,65 @@ func TestErrorCarriesTheKernelsDetailList(t *testing.T) {
 		t.Errorf("empty buffer must give no detail: %+v", e)
 	}
 }
+
+func TestDoOnceNeverRepeatsTheCall(t *testing.T) {
+	for name, errno := range map[string]error{"EINTR": syscall.EINTR, "ENOMEM": syscall.ENOMEM, "EPIPE": syscall.EPIPE} {
+		calls := 0
+		c := newConn(func(IOC, *Cmd, *buffers) error { calls++; return errno })
+		_, err := c.CallOnce(IOCRecvNew, "tank", nil)
+		if calls != 1 || !errors.Is(err, errno) {
+			t.Errorf("%s: %d calls, err %v", name, calls, err)
+		}
+	}
+
+	// A reply that does not fit: the call has happened, so it is reported, not repeated.
+	calls := 0
+	c := newConn(func(ioc IOC, cmd *Cmd, b *buffers) error { calls++; cmd.NvlistDstSize = 5 << 20; return nil })
+	if _, err := c.CallOnce(IOCRecvNew, "tank", nil); !errors.Is(err, ErrTruncated) || calls != 1 {
+		t.Errorf("truncated reply: %d calls, %v", calls, err)
+	}
+
+	want := listOf(t, "read_bytes", "42")
+	var sizes []int
+	c = newConn(func(ioc IOC, cmd *Cmd, b *buffers) error {
+		sizes = append(sizes, len(b.dst))
+		reply(t, cmd, b, want)
+		return nil
+	})
+	out, err := c.CallOnce(IOCRecvNew, "tank", nil)
+	if err != nil || !reflect.DeepEqual(out, want) || len(sizes) != 1 || sizes[0] != onceDstSize {
+		t.Errorf("out = %v, err = %v, sizes = %v", out, err, sizes)
+	}
+
+	// The detail list of a failed call is still read.
+	detail := listOf(t, "errors", "x")
+	c = newConn(func(ioc IOC, cmd *Cmd, b *buffers) error {
+		packed, _ := nvlist.Pack(detail)
+		copy(b.dst, packed)
+		return syscall.EINVAL
+	})
+	_, err = c.CallOnce(IOCRecvNew, "tank", nil)
+	var e *Error
+	if !errors.As(err, &e) || e.Detail == nil {
+		t.Errorf("no detail on %v", err)
+	}
+}
+
+func TestZFSErrnoNames(t *testing.T) {
+	e := &Error{Ioc: IOCRecvNew, Name: "tank", Errno: ErrStreamTruncated}
+	if got, want := e.Error(), `ZFS_IOC_RECV_NEW "tank": the stream is truncated`; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+	if ErrStreamTruncated != 1040 || ErrCryptoNotSupported != 1024+24 || ErrAshiftMismatch != 1024+26 {
+		t.Errorf("numbering is off: %d %d %d", ErrStreamTruncated, ErrCryptoNotSupported, ErrAshiftMismatch)
+	}
+	if !errors.Is(e, ErrStreamTruncated) {
+		t.Error("errors.Is must see the errno")
+	}
+	if got := ErrnoString(syscall.ENOENT); got != syscall.ENOENT.Error() {
+		t.Errorf("ordinary errno: %q", got)
+	}
+	if got := ErrnoString(5000); got == "" {
+		t.Error("unknown ZFS errno has no text")
+	}
+}

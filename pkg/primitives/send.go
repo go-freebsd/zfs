@@ -40,7 +40,8 @@ type SendOptions struct {
 	ResumeObject, ResumeOffset, ResumeBytes uint64
 
 	// RedactBookmark sends a redacted stream, using the redaction bookmark
-	// made by Redact (zfs send --redact).
+	// made by Redact (zfs send --redact): its name, with or without the
+	// dataset and #.
 	RedactBookmark string
 
 	// Progress, if set, is called about every ProgressInterval (100 ms if
@@ -78,6 +79,15 @@ func expand(dataset, name string) string {
 	return name
 }
 
+// shortBook is the bookmark name without dataset and #, which is what the
+// kernel takes for redaction bookmarks.
+func shortBook(name string) string {
+	if i := strings.LastIndexByte(name, '#'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
 func datasetOf(name string) string {
 	if i := strings.IndexAny(name, "@#"); i >= 0 {
 		return name[:i]
@@ -103,7 +113,7 @@ func (o *SendOptions) sendArgs(snapshot string, fd int) (*nvlist.List, error) {
 		in.Add("resume_offset", o.ResumeOffset)
 	}
 	if o.RedactBookmark != "" {
-		in.Add("redactbook", expand(datasetOf(snapshot), o.RedactBookmark))
+		in.Add("redactbook", shortBook(o.RedactBookmark))
 	}
 	return in, nil
 }
@@ -140,7 +150,7 @@ func (c *Client) SendSize(snapshot string, o *SendOptions) (uint64, error) {
 			in.Add("bytes", o.ResumeBytes)
 		}
 		if o.RedactBookmark != "" {
-			in.Add("redactbook", expand(datasetOf(snapshot), o.RedactBookmark))
+			in.Add("redactbook", shortBook(o.RedactBookmark))
 		}
 	}
 	out, err := c.c.Call(ioctl.IOCSendSpace, snapshot, in)
@@ -180,7 +190,7 @@ func (c *Client) Redact(snapshot, bookmark string, redactionSnapshots []string) 
 		snaps.Add(s, nvlist.Flag{})
 	}
 	in := nvlist.New()
-	in.Add("bookname", expand(datasetOf(snapshot), bookmark))
+	in.Add("bookname", shortBook(bookmark))
 	in.Add("snapnv", snaps)
 	_, err := c.c.Call(ioctl.IOCRedact, snapshot, in)
 	return err

@@ -313,8 +313,25 @@ func (c *Client) ResumeToken(dataset string) (token string, ok bool, err error) 
 	return t, true, nil
 }
 
+// ErrNoResumeState is returned by AbortResume for a dataset without an
+// interrupted resumable receive.
+var ErrNoResumeState = errors.New("zfs: no resumable receive state to abort")
+
 // AbortResume discards the partially received state of an interrupted
-// resumable receive (zfs receive -A).
+// resumable receive (zfs receive -A). The state is a hidden "%recv" child
+// when the dataset existed, or the half received dataset itself.
 func (c *Client) AbortResume(dataset string) error {
-	return c.destroyHead(dataset + "/%recv")
+	if ok, err := c.Exists(dataset + "/%recv"); err != nil {
+		return err
+	} else if ok {
+		return c.destroyHead(dataset + "/%recv")
+	}
+	d, err := c.get(dataset, false, []string{"receive_resume_token"})
+	if err != nil {
+		return err
+	}
+	if tok, _ := d.String("receive_resume_token"); !d.Inconsistent || tok == "" || tok == "-" {
+		return fmt.Errorf("%w: %s", ErrNoResumeState, dataset)
+	}
+	return c.destroyHead(dataset)
 }

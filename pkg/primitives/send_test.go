@@ -191,7 +191,7 @@ func TestSendToWriterPassesFlagsAndBytes(t *testing.T) {
 	}
 
 	buf.Reset()
-	if err := c.Send(context.Background(), "tank/a@s2", &buf, &SendOptions{From: "@s1", ResumeObject: 9, ResumeOffset: 4096, RedactBookmark: "#rb"}); err != nil {
+	if err := c.Send(context.Background(), "tank/a@s2", &buf, &SendOptions{From: "@s1", ResumeObject: 9, ResumeOffset: 4096, RedactBookmark: "tank/a#rb"}); err != nil {
 		t.Fatal(err)
 	}
 	w = lastWrite(t, k)
@@ -201,7 +201,7 @@ func TestSendToWriterPassesFlagsAndBytes(t *testing.T) {
 	if o, _ := w.in.Uint64("resume_object"); o != 9 {
 		t.Errorf("resume_object = %d", o)
 	}
-	if rb, _ := w.in.String("redactbook"); rb != "tank/a#rb" {
+	if rb, _ := w.in.String("redactbook"); rb != "rb" {
 		t.Errorf("redactbook = %q", rb)
 	}
 	if buf.String() != string(k.sendData["tank/a@s1>tank/a@s2"]) {
@@ -337,7 +337,7 @@ func TestSendSizeProgressRedact(t *testing.T) {
 	if r.ioc != ioctl.IOCRedact || r.name != "tank/a@s2" {
 		t.Fatalf("redact call = %+v", r)
 	}
-	if b, _ := r.in.String("bookname"); b != "tank/a#red" {
+	if b, _ := r.in.String("bookname"); b != "red" {
 		t.Errorf("bookname = %q", b)
 	}
 	if sn, _ := r.in.List("snapnv"); sn == nil || !sn.Has("tank/a@s1") {
@@ -576,6 +576,11 @@ func TestResumeTokenPropertyAndAbort(t *testing.T) {
 	if _, ok, _ := c.ResumeToken("tank/a"); ok {
 		t.Error(`"-" is no token`)
 	}
+	// Without a %recv child and without an inconsistent dataset there is nothing to abort.
+	if err := c.AbortResume("tank/a"); !errors.Is(err, ErrNoResumeState) {
+		t.Errorf("abort without state: %v", err)
+	}
+	k.add(&fakeDS{name: "tank/a/%recv", osType: 2})
 	if err := c.AbortResume("tank/a"); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,10 +40,27 @@ func testClient(t *testing.T) (*Client, string) {
 		t.Fatalf("ZFS_TEST_POOL is set but /dev/zfs cannot be opened: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
+	// Directories for mountpoints. This cleanup is registered before any
+	// dataset's, so it runs after they are destroyed and unmounted.
+	roots.Store(t.Name(), t.TempDir())
 	if ok, err := c.Exists(pool + "/a@s2"); err != nil || !ok {
 		t.Fatalf("fixtures are missing (%v, %v): run internal/ci/fixtures.sh %s", ok, err, pool)
 	}
 	return c, pool
+}
+
+var roots sync.Map // test name -> directory for its mountpoints
+
+// tdir makes a directory for a mountpoint.
+func tdir(t *testing.T) string {
+	t.Helper()
+	root, _ := roots.Load(t.Name())
+	r, _ := root.(string)
+	d, err := os.MkdirTemp(r, "mp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 // cli runs a command and returns its output with the trailing newline cut.
