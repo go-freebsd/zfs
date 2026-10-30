@@ -52,9 +52,15 @@ jobs:
               zpool list
               zfs list
               go version
+              # Datasets, snapshots, holds, bookmarks and large property lists
+              # that the tests compare against zfs(8). A failure shows up as
+              # failing tests; keep going so the log is complete.
+              sh internal/ci/fixtures.sh testpool || echo "FIXTURES FAILED"
             } > test.log 2>&1
             export ZFS_TEST_POOL=testpool
-            go vet ./... >> test.log 2>&1 && go test -v -count=1 ./... >> test.log 2>&1
+            # -p 1: the packages share one pool, and the ioctl smoke test
+            # creates and destroys a snapshot of its root; run them one by one.
+            go vet ./... >> test.log 2>&1 && go test -p 1 -v -count=1 ./... >> test.log 2>&1
             echo $? > test.rc
             exit 0
       - name: Surface FreeBSD test output
