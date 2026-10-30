@@ -1,5 +1,7 @@
 package zfs
 
+import "fmt"
+
 // The property table. It lists what the kernel does not tell: the kind of
 // each property and, for enumerations, the names of the stored numbers. The
 // numbers are the kernel's; the FreeBSD CI tests set every value through
@@ -23,6 +25,16 @@ func vals(pairs ...any) []PropValue {
 	out := make([]PropValue, 0, len(pairs)/2)
 	for i := 0; i < len(pairs); i += 2 {
 		out = append(out, PropValue{pairs[i].(string), uint64(pairs[i+1].(int))})
+	}
+	return out
+}
+
+// zstdLevels are zstd-1 to zstd-19: ZIO_COMPRESS_ZSTD with the level in the
+// bits above SPA_COMPRESSBITS (7). The "zstd-fast" levels are not listed.
+func zstdLevels() []PropValue {
+	out := make([]PropValue, 0, 19)
+	for n := uint64(1); n <= 19; n++ {
+		out = append(out, PropValue{fmt.Sprintf("zstd-%d", n), 16 | n<<7})
 	}
 	return out
 }
@@ -70,9 +82,9 @@ var propTable = []PropInfo{
 	PropInfo{Name: "casesensitivity", Kind: KindEnum, Values: vals("sensitive", 0, "insensitive", 1, "mixed", 2), CreateOnly: true, Types: tFS}.withDefault("sensitive"),
 	enumProp("checksum", tFV, "on", vals("on", 1, "off", 2, "fletcher2", 6, "fletcher4", 7, "sha256", 8,
 		"noparity", 10, "sha512", 11, "skein", 12, "edonr", 13, "blake3", 14)),
-	enumProp("compression", tFV, "on", vals("on", 1, "off", 2, "lzjb", 3,
+	enumProp("compression", tFV, "on", append(vals("on", 1, "off", 2, "lzjb", 3,
 		"gzip-1", 5, "gzip-2", 6, "gzip-3", 7, "gzip-4", 8, "gzip-5", 9, "gzip", 10, "gzip-7", 11, "gzip-8", 12, "gzip-9", 13,
-		"zle", 14, "lz4", 15)),
+		"zle", 14, "lz4", 15, "zstd", 16), zstdLevels()...)),
 	enumProp("copies", tFV, "1", vals("1", 1, "2", 2, "3", 3)),
 	enumProp("dedup", tFV, "off", vals("off", 2, "on", 1, "verify", 257, "sha256", 8, "sha256,verify", 264,
 		"sha512", 11, "sha512,verify", 267, "skein", 12, "skein,verify", 268,

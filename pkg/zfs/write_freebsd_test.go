@@ -506,8 +506,8 @@ func TestWriteRefusals(t *testing.T) {
 	if err := c.Clone(ds+"2", ds+"@none", nil); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("clone of a missing snapshot: %v", err)
 	}
-	if err := c.Snapshot([]string{ds + "@bad name"}, nil); err == nil {
-		t.Error("snapshot name with a space accepted")
+	if err := c.Snapshot([]string{ds + "@bad@name"}, nil); err == nil {
+		t.Error("snapshot name with two @ accepted")
 	}
 	if err := c.Promote(ds); err == nil {
 		t.Error("promoting a non-clone succeeded")
@@ -519,5 +519,33 @@ func TestWriteRefusals(t *testing.T) {
 	}
 	if err := c.UnloadKey(ds); err == nil {
 		t.Error("unloading the key of an unencrypted dataset succeeded")
+	}
+}
+
+// Which shapes of snapshot request does the kernel take? Each failing shape is
+// reported with the kernel's error.
+func TestSnapshotRequestShapes(t *testing.T) {
+	c, pool := testClient(t)
+	ds := wds(t, pool, "shapes")
+	for _, n := range []string{ds, ds + "/kid"} {
+		if err := c.Create(n, &CreateOptions{Props: map[string]any{"mountpoint": "none"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shapes := []struct {
+		name  string
+		snaps []string
+		props map[string]any
+	}{
+		{"one", []string{ds + "@one"}, nil},
+		{"one with prop", []string{ds + "@two"}, map[string]any{"test:p": "v"}},
+		{"two datasets", []string{ds + "@three", ds + "/kid@three"}, nil},
+		{"two snaps of one dataset", []string{ds + "@four", ds + "@five"}, nil},
+		{"two datasets with prop", []string{ds + "@six", ds + "/kid@six"}, map[string]any{"test:p": "v"}},
+	}
+	for _, s := range shapes {
+		if err := c.Snapshot(s.snaps, s.props); err != nil {
+			t.Errorf("%s: %v", s.name, err)
+		}
 	}
 }

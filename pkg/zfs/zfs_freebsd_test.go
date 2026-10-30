@@ -339,6 +339,10 @@ func compareProps(t *testing.T, d *Dataset) (numeric, strs, skipped int, mismatc
 				continue
 			}
 			n, _ := strconv.ParseUint(val, 10, 64)
+			if prop == "available" && (n > v && n-v < 1<<20 || v > n && v-n < 1<<20) {
+				numeric++ // the pool-wide free space moves while earlier tests' frees are synced
+				continue
+			}
 			if n != v {
 				mismatches = append(mismatches, prop+": kernel "+strconv.FormatUint(v, 10)+", zfs get "+val)
 				continue
