@@ -126,6 +126,7 @@ var propTable = []PropInfo{
 	roNumber("snapshot_count", tFV),
 	roNumber("filesystem_count", tFS),
 	{Name: "version", Kind: KindNumber, Types: tFS},
+	{Name: "pbkdf2salt", Kind: KindNumber, ReadOnly: true, Types: tFV}, // chosen by Create for passphrase keys
 	PropInfo{Name: "pbkdf2iters", Kind: KindNumber, CreateOnly: true, Types: tFV}.withDefaultNum(0),
 	PropInfo{Name: "snapshot_limit", Kind: KindNumber, Types: tFV, None: NoneIsMax}.withDefaultNum(^uint64(0)),
 	PropInfo{Name: "filesystem_limit", Kind: KindNumber, Types: tFS, None: NoneIsMax}.withDefaultNum(^uint64(0)),

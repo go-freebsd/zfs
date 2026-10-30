@@ -160,6 +160,12 @@ func setPropsError(dataset string, err error) error {
 // convertProp turns a Go value into what the kernel stores: a uint64 for
 // numbers and enumerations, a string for strings.
 func convertProp(name string, v any, snapshot bool) (any, error) {
+	return convertPropFor(name, v, snapshot, false)
+}
+
+// convertPropFor is convertProp for SetProps (create false) or for dataset
+// creation (create true), where the create-only properties are allowed.
+func convertPropFor(name string, v any, snapshot, create bool) (any, error) {
 	info, ok := LookupProp(name)
 	if !ok {
 		return nil, propErr(name, ErrUnknownProp, "not a known property or a user property (module:name)")
@@ -167,7 +173,7 @@ func convertProp(name string, v any, snapshot bool) (any, error) {
 	switch {
 	case info.ReadOnly:
 		return nil, propErr(name, ErrReadOnlyProp, "")
-	case info.CreateOnly:
+	case info.CreateOnly && !create:
 		return nil, propErr(name, ErrCreateOnly, "")
 	case snapshot && info.Kind != KindUser:
 		return nil, propErr(name, ErrReadOnlyProp, "only user properties can be set on a snapshot")

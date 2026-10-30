@@ -24,6 +24,9 @@ type fakeKernel struct {
 	nextTok uint64
 	calls   []string
 
+	writes   []writeCall         // create/destroy/rename/... requests received
+	writeErr map[ioctl.IOC]error // errors to return for them
+	writeOut map[ioctl.IOC]*nvlist.List
 	sets     []setCall                // SET_PROP requests received
 	inherits []inheritCall            // INHERIT_PROP requests received
 	setFail  map[string]syscall.Errno // properties the "kernel" refuses
@@ -31,6 +34,33 @@ type fakeKernel struct {
 	// hook, if set, runs before a call is served; a non-nil error is returned.
 	hook func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error
 	n    int
+}
+
+type writeCall struct {
+	ioc    ioctl.IOC
+	name   string
+	value  string // zc_value
+	cookie uint64
+	in     *nvlist.List
+}
+
+func isWriteIOC(ioc ioctl.IOC) bool {
+	switch ioc {
+	case ioctl.IOCCreate, ioctl.IOCDestroy, ioctl.IOCRollback, ioctl.IOCRename, ioctl.IOCPromote,
+		ioctl.IOCSnapshot, ioctl.IOCHold, ioctl.IOCRelease, ioctl.IOCDestroySnaps, ioctl.IOCClone,
+		ioctl.IOCBookmark, ioctl.IOCDestroyBookmarks, ioctl.IOCLoadKey, ioctl.IOCUnloadKey, ioctl.IOCChangeKey:
+		return true
+	}
+	return false
+}
+
+// write records a write ioctl and answers it from writeErr/writeOut.
+func (k *fakeKernel) write(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist.List, error) {
+	k.writes = append(k.writes, writeCall{ioc, cmd.GetName(), cmd.GetValue(), cmd.Cookie, in})
+	if err := k.writeErr[ioc]; err != nil {
+		return nil, err
+	}
+	return k.writeOut[ioc], nil
 }
 
 type setCall struct {
@@ -147,6 +177,9 @@ func (k *fakeKernel) Do(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist
 			return nil, err
 		}
 	}
+	if isWriteIOC(ioc) {
+		return k.write(ioc, cmd, in)
+	}
 	switch ioc {
 	case ioctl.IOCObjsetStats:
 		d, ok := k.ds[cmd.GetName()]
@@ -250,6 +283,11 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 			return nil, err
 		}
 	}
+	if isWriteIOC(ioc) {
+		cmd := ioctl.NewCmd()
+		cmd.SetName(name)
+		return k.write(ioc, cmd, in)
+	}
 	d, ok := k.ds[name]
 	if !ok {
 		return nil, k.fail(ioc, name, syscall.ENOENT)
@@ -313,6 +351,10 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 func (k *fakeKernel) Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error {
 	k.n++
 	k.calls = append(k.calls, ioc.String()+" "+cmd.GetName())
+	if isWriteIOC(ioc) {
+		_, err := k.write(ioc, cmd, nil)
+		return err
+	}
 	if _, ok := k.ds[cmd.GetName()]; !ok {
 		return k.fail(ioc, cmd.GetName(), syscall.ENOENT)
 	}
