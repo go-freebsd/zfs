@@ -122,8 +122,9 @@ func TestListMatchesZfsList(t *testing.T) {
 		missing, extra := diff(want, have)
 		t.Errorf("List differs from zfs list: missing %v, extra %v", missing, extra)
 	}
-	if len(have) < 150 {
-		t.Errorf("only %d entries: the fixtures (130+ datasets) were not listed", len(have))
+	// 128 datasets, 6 snapshots and 1 bookmark are created by fixtures.sh.
+	if len(have) < 135 {
+		t.Errorf("only %d entries: the fixtures (135) were not listed", len(have))
 	}
 
 	// Order: a dataset comes before its snapshots, bookmarks and children.
@@ -454,7 +455,7 @@ func TestBookmarksMatchZfsList(t *testing.T) {
 	for _, b := range got {
 		t.Logf("bookmark %s guid=%d createtxg=%d props=%v", b.Name, b.GUID, b.CreationTxg, b.Props)
 	}
-	rs := rows(cli(t, "zfs", "list", "-H", "-t", "bookmark", "-o", "name,guid,createtxg", pool+"/a"))
+	rs := rows(cli(t, "zfs", "list", "-H", "-t", "bookmark", "-r", "-o", "name,guid,createtxg", pool+"/a"))
 	if len(rs) != 1 || len(got) != 1 {
 		t.Fatalf("bookmarks: ours %v, zfs list %v", names(got), rs)
 	}

@@ -42,6 +42,7 @@ jobs:
             # The test command never fails this script: the verdict is written
             # to test.rc and judged by the next step, so test.log always
             # reaches the host even when the tests fail.
+            set +e   # the VM shell may run with errexit; the verdict goes to test.rc
             cd "$GITHUB_WORKSPACE"
             {
               echo "== $(uname -sr), osreldate $(sysctl -n kern.osreldate)"
@@ -60,8 +61,12 @@ jobs:
             export ZFS_TEST_POOL=testpool
             # -p 1: the packages share one pool, and the ioctl smoke test
             # creates and destroys a snapshot of its root; run them one by one.
-            go vet ./... >> test.log 2>&1 && go test -p 1 -v -count=1 ./... >> test.log 2>&1
-            echo $? > test.rc
+            rc=0
+            go vet ./... >> test.log 2>&1 || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              go test -p 1 -v -count=1 ./... >> test.log 2>&1 || rc=$?
+            fi
+            echo "$rc" > test.rc
             exit 0
       - name: Surface FreeBSD test output
         if: always()
