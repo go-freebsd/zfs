@@ -379,8 +379,12 @@ func TestSnapshotCloneRollbackPromoteDestroy(t *testing.T) {
 	if err := c.Release("t1", ds+"@a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Release("t1", ds+"@a"); !errors.Is(err, fs.ErrNotExist) {
+	// The kernel does not report a hold that is already gone.
+	if err := c.Release("t1", ds+"@a"); err != nil {
 		t.Errorf("releasing a missing hold: %v", err)
+	}
+	if got := lines(cli(t, "zfs", "holds", "-H", ds+"@a")); len(got) != 0 {
+		t.Errorf("holds left: %v", got)
 	}
 
 	// Bookmarks.
