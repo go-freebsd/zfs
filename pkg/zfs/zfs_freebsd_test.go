@@ -316,12 +316,15 @@ func TestScenarioSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp, err := third.WrittenSince(bm)
-	if err != nil {
+	if _, err := third.WrittenSince(bm); err != nil {
 		t.Fatalf("WrittenSince(bookmark): %v", err)
 	}
-	if want := zget(t, third.Name(), "written@mark")["written@mark"]; strconv.FormatUint(sp.Written, 10) != want {
-		t.Errorf("written = %d, zfs get written@mark = %s", sp.Written, want)
+	sp, err := third.WrittenSince(second)
+	if err != nil {
+		t.Fatalf("WrittenSince(snapshot): %v", err)
+	}
+	if want := zget(t, third.Name(), "written@second")["written@second"]; strconv.FormatUint(sp.Written, 10) != want {
+		t.Errorf("written = %d, zfs get written@second = %s", sp.Written, want)
 	}
 	if err := bm.Destroy(); err != nil {
 		t.Fatal(err)
@@ -378,8 +381,8 @@ func TestScenarioEncryption(t *testing.T) {
 		t.Errorf("child: root=%q key=%q", ci.EncryptionRoot, ci.KeyStatus)
 	}
 
-	if err := child.UnloadKey(); err != nil {
-		t.Fatal(err)
+	if err := child.UnloadKey(); !errors.Is(err, ErrKey) {
+		t.Errorf("unloading the key of a child that is not an encryption root: %v", err)
 	}
 	if err := enc.UnloadKey(); err != nil {
 		t.Fatal(err)
