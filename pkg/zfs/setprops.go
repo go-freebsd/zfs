@@ -241,10 +241,10 @@ func convertProp(name string, v any, snapshot bool) (any, error) {
 			if err != nil {
 				return nil, propErr(name, ErrBadValue, "%v", err)
 			}
-			return n, nil
+			return checkNumber(name, n)
 		}
 		if n, ok := toUint64(v); ok {
-			return n, nil
+			return checkNumber(name, n)
 		}
 		return nil, propErr(name, ErrBadValue, "expected a non-negative integer or a string, not %v (%T)", v, v)
 	}
@@ -322,4 +322,27 @@ func ParseSize(s string) (uint64, error) {
 		return 0, fmt.Errorf("%q is too large", s)
 	}
 	return r.Num().Uint64(), nil
+}
+
+// Block size limits: SPA_MINBLOCKSIZE and SPA_MAXBLOCKSIZE. The pool's own
+// maximum (maxblocksize) may be lower; the kernel enforces that one.
+const (
+	minBlockSize = 512
+	maxBlockSize = 16 << 20
+)
+
+// checkNumber applies the checks libzfs does in userland, because the kernel
+// accepts any number for these properties (it takes recordsize=3000).
+func checkNumber(name string, n uint64) (any, error) {
+	switch name {
+	case "recordsize":
+		if n < minBlockSize || n > maxBlockSize || n&(n-1) != 0 {
+			return nil, propErr(name, ErrBadValue, "%d must be a power of 2 from %d to %d", n, minBlockSize, maxBlockSize)
+		}
+	case "special_small_blocks":
+		if n > maxBlockSize {
+			return nil, propErr(name, ErrBadValue, "%d exceeds the maximum block size %d", n, maxBlockSize)
+		}
+	}
+	return n, nil
 }

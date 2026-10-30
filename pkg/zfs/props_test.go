@@ -2,6 +2,7 @@ package zfs
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"reflect"
@@ -240,6 +241,8 @@ func TestConvertProp(t *testing.T) {
 		{"refreservation", "none", false, uint64(0)}, {"recordsize", "64k", false, uint64(65536)},
 		{"volsize", "1.5G", false, uint64(3 << 29)},
 		// numbers
+		{"recordsize", 512, false, uint64(512)}, {"recordsize", "16M", false, uint64(16 << 20)},
+		{"special_small_blocks", 0, false, uint64(0)}, {"special_small_blocks", "32k", false, uint64(32768)},
 		{"snapshot_limit", "none", false, max}, {"snapshot_limit", "5", false, uint64(5)},
 		{"filesystem_limit", 10, false, uint64(10)},
 		// strings and user properties
@@ -272,6 +275,10 @@ func TestConvertProp(t *testing.T) {
 		{"compression", true, false, ErrBadValue}, {"compression", 1.5, false, ErrBadValue},
 		{"quota", -5, false, ErrBadValue}, {"quota", 1.5, false, ErrBadValue}, {"quota", "abc", false, ErrBadValue},
 		{"recordsize", "none", false, ErrBadValue}, // none is only accepted where it means something
+		// libzfs checks block sizes in userland; the kernel accepts any number.
+		{"recordsize", 3000, false, ErrBadValue}, {"recordsize", 0, false, ErrBadValue},
+		{"recordsize", 256, false, ErrBadValue}, {"recordsize", "32M", false, ErrBadValue},
+		{"special_small_blocks", "32M", false, ErrBadValue},
 		{"snapshot_limit", "many", false, ErrBadValue},
 		{"mountpoint", 5, false, ErrBadValue},
 		{"test:note", 5, false, ErrBadValue},
@@ -346,7 +353,7 @@ func TestSetPropsValidatesEverythingBeforeSending(t *testing.T) {
 func TestSetPropsReportsEachRefusedProperty(t *testing.T) {
 	k := newFake(t)
 	k.setFail = map[string]syscall.Errno{"recordsize": syscall.EINVAL, "quota": syscall.EDQUOT}
-	err := newClient(k).SetProps("tank/a", map[string]any{"recordsize": 3, "quota": "1G", "atime": true})
+	err := newClient(k).SetProps("tank/a", map[string]any{"recordsize": 65536, "quota": "1G", "atime": true})
 	var spe *SetPropsError
 	if !errors.As(err, &spe) {
 		t.Fatalf("err = %#v", err)
@@ -357,7 +364,8 @@ func TestSetPropsReportsEachRefusedProperty(t *testing.T) {
 	if !errors.Is(err, syscall.EINVAL) || !errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.EPERM) {
 		t.Error("Unwrap must expose every errno")
 	}
-	if got, want := err.Error(), "zfs: cannot set properties of tank/a: quota: disk quota exceeded; recordsize: invalid argument"; got != want {
+	want := fmt.Sprintf("zfs: cannot set properties of tank/a: quota: %v; recordsize: %v", syscall.EDQUOT, syscall.EINVAL)
+	if got := err.Error(); got != want {
 		t.Errorf("message = %q\nwant      %q", got, want)
 	}
 }

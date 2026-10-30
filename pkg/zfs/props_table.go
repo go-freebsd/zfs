@@ -89,7 +89,7 @@ var propTable = []PropInfo{
 		"aes-128-ccm", 3, "aes-192-ccm", 4, "aes-256-ccm", 5, "aes-128-gcm", 6, "aes-192-gcm", 7, "aes-256-gcm", 8)},
 	{Name: "keyformat", Kind: KindEnum, CreateOnly: true, Types: tFV, Values: vals("none", 0, "raw", 1, "hex", 2, "passphrase", 3)},
 	{Name: "keystatus", Kind: KindEnum, ReadOnly: true, Types: tFV, Values: vals("none", 0, "unavailable", 1, "available", 2)},
-	{Name: "type", Kind: KindEnum, ReadOnly: true, Types: tAll, Values: vals("filesystem", 1, "snapshot", 2, "volume", 4, "bookmark", 16)},
+	{Name: "type", Kind: KindEnum, ReadOnly: true, Types: tAll, Values: vals("filesystem", 2, "volume", 3, "snapshot", 4, "bookmark", 5)}, // DMU_OST_ZFS, ZVOL, OTHER, ANY
 
 	// Sizes, in bytes.
 	roSize("used", tAll),

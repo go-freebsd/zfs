@@ -275,7 +275,7 @@ func TestSetPropsAgainstZfsGet(t *testing.T) {
 func TestParseSizeMatchesZfsSet(t *testing.T) {
 	c, pool := testClient(t)
 	fsName, _ := scratch(t, pool)
-	for _, s := range []string{"1.5G", "10M", "512k", "64K", "2T", "100", "1T", "3.25M"} {
+	for _, s := range []string{"1.5G", "10M", "512k", "64K", "2T", "1T", "3.25M"} {
 		cli(t, "zfs", "set", "quota="+s, fsName)
 		d, err := c.Get(fsName, "quota")
 		if err != nil {
@@ -293,19 +293,23 @@ func TestKernelRefusalsAreReportedPerProperty(t *testing.T) {
 	c, pool := testClient(t)
 	fsName, _ := scratch(t, pool)
 
-	// recordsize must be a power of two; the other value is fine.
-	err := c.SetProps(fsName, map[string]any{"recordsize": 3000, "atime": false})
+	// A quota below what the dataset already uses is refused by the kernel
+	// (recordsize=3000 is not: the kernel accepts it, so SetProps checks it).
+	err := c.SetProps(fsName, map[string]any{"quota": 100, "atime": false})
 	var spe *SetPropsError
 	if !errors.As(err, &spe) {
 		t.Fatalf("err = %#v, want a *SetPropsError", err)
 	}
 	t.Logf("kernel refusal: %v", err)
-	if _, bad := spe.Errors["recordsize"]; !bad || spe.Dataset != fsName {
+	if _, bad := spe.Errors["quota"]; !bad || spe.Dataset != fsName {
 		t.Errorf("%+v", spe)
 	}
 
 	if err := c.SetProp(pool+"/does_not_exist", "atime", true); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("missing dataset: %v", err)
+	}
+	if err := c.SetProp(fsName, "recordsize", 3000); !errors.Is(err, ErrBadValue) {
+		t.Errorf("recordsize 3000 must be refused before it is sent: %v", err)
 	}
 	// A property of volumes on a filesystem is refused by the kernel, not by the table.
 	err = c.SetProp(fsName, "volsize", "1M")
