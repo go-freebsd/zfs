@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,43 +57,109 @@ func TestPropertyTableCoversWhatTheKernelReturns(t *testing.T) {
 	}
 }
 
-// Reading: the name this library gives a stored number must be the name
-// zfs get prints.
+// computed in userland by libzfs; the kernel neither sends nor defaults them.
+var computedByLibzfs = map[string]bool{"mounted": true, "xattr": true}
+
+// Reading: the name this library gives a stored number, or the default it
+// fills in for a property the kernel did not send, must be the name zfs get
+// prints.
 func TestEnumNamesMatchZfsGet(t *testing.T) {
 	c, pool := testClient(t)
-	compared := 0
+	compared, fromDefault := 0, 0
 	seen := map[string]bool{}
 	for _, name := range fixtureDatasets(pool) {
 		d, err := c.Get(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		cl := cliProps(t, name)
-		for prop := range d.Props {
+		for prop, want := range cliProps(t, name) {
 			info, ok := LookupProp(prop)
-			if !ok || (info.Kind != KindEnum && info.Kind != KindBool) {
-				continue
+			if !ok || (info.Kind != KindEnum && info.Kind != KindBool) || want == "-" {
+				continue // unknown properties are reported by the coverage test
 			}
-			want, have := cl[prop]
-			if !have {
-				continue
+			_, sent := d.Props[prop]
+			if d.Type == Snapshot && !sent {
+				continue // a snapshot only reports what it stored
 			}
-			n, _ := d.Uint64(prop)
+			if info.Types&d.Type == 0 && !sent {
+				continue // not a property of this kind of dataset
+			}
 			got, known := d.Enum(prop)
 			switch {
+			case !known && computedByLibzfs[prop]:
 			case !known:
-				t.Errorf("%s %s: kernel number %d is %q in zfs get, the table has no name for it", name, prop, n, want)
+				n, _ := d.Uint64(prop)
+				t.Errorf("%s %s: zfs get says %q; the library has no name for it (kernel sent=%v number=%d, table default=%v/%d)",
+					name, prop, want, sent, n, info.HasDefault, info.Default)
 			case got != want:
-				t.Errorf("%s %s: kernel number %d is %q here but %q in zfs get", name, prop, n, got, want)
+				n, _ := d.storedNum(prop)
+				t.Errorf("%s %s: number %d is %q here but %q in zfs get", name, prop, n, got, want)
 			default:
 				compared++
 				seen[prop] = true
+				if !sent {
+					fromDefault++
+				}
 			}
 		}
 	}
-	t.Logf("%d enumerated values compared over %d properties", compared, len(seen))
-	if compared < 40 || len(seen) < 10 {
-		t.Errorf("only %d values / %d properties compared: the test would pass vacuously", compared, len(seen))
+	t.Logf("%d enumerated values compared over %d properties, %d of them filled in from defaults", compared, len(seen), fromDefault)
+	if compared < 80 || len(seen) < 20 || fromDefault < 30 {
+		t.Errorf("only %d values / %d properties (%d defaults) compared: the test would pass vacuously", compared, len(seen), fromDefault)
+	}
+}
+
+// A dataset without any local setting: every default in the table must be what
+// zfs get reports with the source "default", and every settable property it
+// reports that way must have a default in the table.
+func TestDefaultsMatchZfsGet(t *testing.T) {
+	c, pool := testClient(t)
+	fsName, volName := scratch(t, pool)
+	checked := 0
+	for _, name := range []string{fsName, volName} {
+		d, err := c.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows(cli(t, "zfs", "get", "-Hp", "-o", "property,value,source", "all", name)) {
+			if len(r) != 3 || r[2] != "default" {
+				continue
+			}
+			prop, want := r[0], r[1]
+			info, ok := LookupProp(prop)
+			if !ok {
+				t.Errorf("%s: %q is not in the table (zfs get: %q, default)", name, prop, want)
+				continue
+			}
+			if _, sent := d.Props[prop]; sent || info.ReadOnly || computedByLibzfs[prop] {
+				continue // the kernel sent it, or there is nothing to default
+			}
+			v, have := d.Value(prop)
+			if !have {
+				t.Errorf("%s: no default in the table for %s %s: zfs get says %q", name, info.Kind, prop, want)
+				continue
+			}
+			var got string
+			switch x := v.(type) {
+			case bool:
+				got = map[bool]string{true: "on", false: "off"}[x]
+			case uint64:
+				got = strconv.FormatUint(x, 10)
+			case string:
+				got = x
+			default:
+				got = fmt.Sprint(x)
+			}
+			if got != want {
+				t.Errorf("%s: default of %s is %q in the table, zfs get says %q", name, prop, got, want)
+				continue
+			}
+			checked++
+		}
+	}
+	t.Logf("%d defaults checked", checked)
+	if checked < 40 {
+		t.Errorf("only %d defaults were checked", checked)
 	}
 }
 

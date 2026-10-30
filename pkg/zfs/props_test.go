@@ -44,12 +44,33 @@ func TestPropTableIsConsistent(t *testing.T) {
 				}
 				names[v.Name] = true
 			}
-		case KindString, KindNumber, KindSize, KindTime, KindRatio, KindList:
+		case KindString, KindNumber, KindSize, KindTime, KindRatio, KindList, KindOpaque:
 			if len(p.Values) != 0 {
 				t.Errorf("%s: only bools and enumerations have values", p.Name)
 			}
 		default:
 			t.Errorf("%s: invalid kind %d", p.Name, p.Kind)
+		}
+		if p.HasDefault {
+			switch p.Kind {
+			case KindBool, KindEnum:
+				if _, ok := p.valueName(p.Default); !ok {
+					t.Errorf("%s: the default %d is not one of its values", p.Name, p.Default)
+				}
+			case KindString:
+				if p.Default != 0 {
+					t.Errorf("%s: a string property has a string default", p.Name)
+				}
+			case KindSize, KindNumber:
+				if p.DefaultStr != "" {
+					t.Errorf("%s: a number has a numeric default", p.Name)
+				}
+			default:
+				t.Errorf("%s: a %v has no default", p.Name, p.Kind)
+			}
+		}
+		if p.ReadOnly && p.HasDefault && p.Kind != KindBool {
+			t.Errorf("%s: a read-only property does not need a default", p.Name)
 		}
 		if p.None != NoneInvalid && p.Kind != KindSize && p.Kind != KindNumber {
 			t.Errorf("%s: \"none\" only applies to numbers", p.Name)
@@ -98,13 +119,13 @@ func TestTypedGetters(t *testing.T) {
 	clones := nvlist.New()
 	clones.Add("p/c2", nvlist.Flag{})
 	clones.Add("p/c1", nvlist.Flag{})
-	d := &Dataset{Name: "p/a", Props: map[string]Property{
+	d := &Dataset{Name: "p/a", Type: Volume, Props: map[string]Property{
 		"compression":   {Value: uint64(15), Source: "p"},
 		"checksum":      {Value: uint64(99)}, // a number the table does not know
 		"atime":         {Value: uint64(1)},
 		"readonly":      {Value: uint64(0), Source: "p/a"},
 		"mounted":       {Value: uint64(1)},
-		"type":          {Value: uint64(4)},
+		"type":          {Value: uint64(3)},
 		"creation":      {Value: uint64(1700000000)},
 		"compressratio": {Value: uint64(150)},
 		"used":          {Value: uint64(4096)},
@@ -410,5 +431,74 @@ func TestInheritProp(t *testing.T) {
 	}
 	if err := c.InheritProp("tank/missing", "compression"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("missing dataset: %v", err)
+	}
+}
+
+// The kernel leaves out properties that have their default; the typed
+// getters fill them in from the table.
+func TestDefaultsFillInForPropertiesTheKernelDidNotSend(t *testing.T) {
+	d := &Dataset{Name: "p/a", Type: Filesystem, Props: map[string]Property{
+		"compression": {Value: uint64(15), Source: "p/a"}, // set: not the default
+		"used":        {Value: uint64(1)},
+	}}
+	for name, want := range map[string]any{
+		"atime":          true,  // default on
+		"relatime":       false, // default off
+		"compression":    "lz4", // the stored value wins
+		"checksum":       "on",  // default
+		"sync":           "standard",
+		"recordsize":     uint64(131072),
+		"quota":          uint64(0),
+		"sharenfs":       "off",
+		"snapshot_limit": uint64(math.MaxUint64),
+	} {
+		got, ok := d.Value(name)
+		if !ok || got != want {
+			t.Errorf("Value(%s) = %#v, %v; want %#v", name, got, ok, want)
+		}
+	}
+	if v, ok := d.Bool("atime"); !ok || !v {
+		t.Errorf("Bool(atime) = %v, %v", v, ok)
+	}
+	if s, ok := d.Enum("dnodesize"); !ok || s != "legacy" {
+		t.Errorf("Enum(dnodesize) = %q, %v", s, ok)
+	}
+	if src, ok := d.Source("atime"); !ok || src.Kind != SourceDefault {
+		t.Errorf("Source(atime) = %+v, %v: a defaulted property comes from the default", src, ok)
+	}
+	if src, _ := d.Source("compression"); src.Kind != SourceLocal {
+		t.Errorf("Source(compression) = %+v", src)
+	}
+	// The raw accessors are the kernel's view: defaults are not invented there.
+	if _, ok := d.Uint64("atime"); ok {
+		t.Error("Uint64 must only return what the kernel sent")
+	}
+	// Absent and without a default (or unknown): nothing.
+	for _, name := range []string{"creation", "mountpoint", "bogus", "test:user", "xattr"} {
+		if v, ok := d.Value(name); ok {
+			t.Errorf("Value(%s) = %#v, want not ok", name, v)
+		}
+		if _, ok := d.Source(name); ok {
+			t.Errorf("Source(%s) must not exist", name)
+		}
+	}
+}
+
+// The "type" property is stored as the object set type, which is the same
+// for a snapshot as for its filesystem, so it is answered from the dataset.
+func TestTypeComesFromTheDataset(t *testing.T) {
+	for typ, want := range map[Type]string{
+		Filesystem: "filesystem", Volume: "volume", Snapshot: "snapshot", Bookmark: "bookmark",
+	} {
+		d := &Dataset{Name: "x", Type: typ, Props: map[string]Property{"type": {Value: uint64(2)}}}
+		if got, ok := d.Enum("type"); !ok || got != want {
+			t.Errorf("Enum(type) of a %v = %q, %v", typ, got, ok)
+		}
+		if got, _ := d.Value("type"); got != want {
+			t.Errorf("Value(type) of a %v = %v", typ, got)
+		}
+	}
+	if _, ok := (&Dataset{Name: "x"}).Enum("type"); ok {
+		t.Error("a dataset of unknown type has no type name")
 	}
 }
