@@ -79,11 +79,12 @@ jobs:
           grep -E '^(--- FAIL|FAIL|panic:)' test.log | head -n 10 | while IFS= read -r line; do
             echo "::error title=FreeBSD ${{ matrix.release }}::$line"
           done
-          # The complete output of every failing test (the tail below can miss it).
-          fails=$(awk '/^=== RUN/ {buf=""} {buf = buf $0 "\n"} /^--- FAIL/ {out = out buf} END {printf "%s", out}' test.log | head -c 60000 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-          if [ -n "$fails" ]; then
-            echo "::notice title=FreeBSD ${{ matrix.release }} failing tests, full output::$fails"
-          fi
+          # The complete output of each failing test, one annotation per test
+          # so that none is cut off by the size limit.
+          for name in $(grep -E '^--- FAIL' test.log | awk '{print $3}' | head -n 12); do
+            body=$(awk -v t="$name" '$0 == "=== RUN   " t {on=1} on {print} on && index($0, "--- FAIL: " t " ") == 1 {exit}' test.log | head -c 20000 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=FreeBSD ${{ matrix.release }} $name::$body"
+          done
           # A compact verdict per test; the tail below can be cut off by the size limit.
           res=$(grep -E -- '^(--- |ok |FAIL|PASS|panic)' test.log | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
           echo "::notice title=FreeBSD ${{ matrix.release }} test results::$res"

@@ -46,7 +46,7 @@ func roNumber(name string, types Type) PropInfo {
 var propTable = []PropInfo{
 	// On/off switches.
 	boolProp("atime", tFS, "on"),
-	boolProp("relatime", tFS, "off"),
+	boolProp("relatime", tFS, "on"),
 	boolProp("devices", tFS, "on"),
 	boolProp("exec", tFS, "on"),
 	boolProp("setuid", tFS, "on"),
@@ -65,10 +65,10 @@ var propTable = []PropInfo{
 	enumProp("aclmode", tFS, "discard", vals("discard", 0, "groupmask", 2, "passthrough", 3, "restricted", 4)),
 	enumProp("acltype", tFS, "nfsv4", vals("off", 0, "posix", 1, "nfsv4", 2)),
 	enumProp("canmount", tFS, "on", vals("off", 0, "on", 1, "noauto", 2)),
-	{Name: "casesensitivity", Kind: KindEnum, Values: vals("sensitive", 0, "insensitive", 1, "mixed", 2), CreateOnly: true, Types: tFS},
+	PropInfo{Name: "casesensitivity", Kind: KindEnum, Values: vals("sensitive", 0, "insensitive", 1, "mixed", 2), CreateOnly: true, Types: tFS}.withDefault("sensitive"),
 	enumProp("checksum", tFV, "on", vals("on", 1, "off", 2, "fletcher2", 6, "fletcher4", 7, "sha256", 8,
 		"noparity", 10, "sha512", 11, "skein", 12, "edonr", 13, "blake3", 14)),
-	enumProp("compression", tFV, "off", vals("on", 1, "off", 2, "lzjb", 3,
+	enumProp("compression", tFV, "on", vals("on", 1, "off", 2, "lzjb", 3,
 		"gzip-1", 5, "gzip-2", 6, "gzip-3", 7, "gzip-4", 8, "gzip-5", 9, "gzip", 10, "gzip-7", 11, "gzip-8", 12, "gzip-9", 13,
 		"zle", 14, "lz4", 15)),
 	enumProp("copies", tFV, "1", vals("1", 1, "2", 2, "3", 3)),
@@ -85,9 +85,9 @@ var propTable = []PropInfo{
 	enumProp("sync", tFV, "standard", vals("standard", 0, "always", 1, "disabled", 2)),
 	enumProp("volmode", tVol, "default", vals("default", 0, "full", 1, "dev", 2, "none", 3)),
 	{Name: "xattr", Kind: KindEnum, Inherits: true, Types: tFS, Values: vals("off", 0, "dir", 1, "sa", 2)}, // "on" is 1 on FreeBSD 14.3 and 2 on 15.0: use "dir" or "sa"
-	{Name: "encryption", Kind: KindEnum, CreateOnly: true, Types: tFV, Values: vals("off", 2, "on", 1,
-		"aes-128-ccm", 3, "aes-192-ccm", 4, "aes-256-ccm", 5, "aes-128-gcm", 6, "aes-192-gcm", 7, "aes-256-gcm", 8)},
-	{Name: "keyformat", Kind: KindEnum, CreateOnly: true, Types: tFV, Values: vals("none", 0, "raw", 1, "hex", 2, "passphrase", 3)},
+	PropInfo{Name: "encryption", Kind: KindEnum, CreateOnly: true, Types: tFV, Values: vals("off", 2, "on", 1,
+		"aes-128-ccm", 3, "aes-192-ccm", 4, "aes-256-ccm", 5, "aes-128-gcm", 6, "aes-192-gcm", 7, "aes-256-gcm", 8)}.withDefault("off"),
+	PropInfo{Name: "keyformat", Kind: KindEnum, CreateOnly: true, Types: tFV, Values: vals("none", 0, "raw", 1, "hex", 2, "passphrase", 3)}.withDefault("none"),
 	{Name: "keystatus", Kind: KindEnum, ReadOnly: true, Types: tFV, Values: vals("none", 0, "unavailable", 1, "available", 2)},
 	{Name: "type", Kind: KindEnum, ReadOnly: true, Types: tAll, Values: vals("filesystem", 2, "volume", 3)}, // the object set type; see Dataset.Enum
 
@@ -122,7 +122,7 @@ var propTable = []PropInfo{
 	roNumber("snapshot_count", tFV),
 	roNumber("filesystem_count", tFS),
 	{Name: "version", Kind: KindNumber, Types: tFS},
-	{Name: "pbkdf2iters", Kind: KindNumber, CreateOnly: true, Types: tFV},
+	PropInfo{Name: "pbkdf2iters", Kind: KindNumber, CreateOnly: true, Types: tFV}.withDefaultNum(0),
 	PropInfo{Name: "snapshot_limit", Kind: KindNumber, Types: tFV, None: NoneIsMax}.withDefaultNum(^uint64(0)),
 	PropInfo{Name: "filesystem_limit", Kind: KindNumber, Types: tFS, None: NoneIsMax}.withDefaultNum(^uint64(0)),
 
@@ -136,8 +136,8 @@ var propTable = []PropInfo{
 	{Name: "mountpoint", Kind: KindString, Inherits: true, Types: tFS},
 	PropInfo{Name: "sharenfs", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("off"),
 	PropInfo{Name: "sharesmb", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("off"),
-	{Name: "mlslabel", Kind: KindString, Inherits: true, Types: tFS},
-	{Name: "keylocation", Kind: KindString, Types: tFV},
+	PropInfo{Name: "mlslabel", Kind: KindString, Inherits: true, Types: tFS}.withDefaultStr("none"),
+	PropInfo{Name: "keylocation", Kind: KindString, Types: tFV}.withDefaultStr("none"),
 	{Name: "origin", Kind: KindString, ReadOnly: true, Types: tFV},
 	{Name: "encryptionroot", Kind: KindString, ReadOnly: true, Types: tFV},
 	{Name: "receive_resume_token", Kind: KindString, ReadOnly: true, Types: tFV},

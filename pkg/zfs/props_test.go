@@ -443,7 +443,7 @@ func TestDefaultsFillInForPropertiesTheKernelDidNotSend(t *testing.T) {
 	}}
 	for name, want := range map[string]any{
 		"atime":          true,  // default on
-		"relatime":       false, // default off
+		"relatime":       true,  // default on (FreeBSD)
 		"compression":    "lz4", // the stored value wins
 		"checksum":       "on",  // default
 		"sync":           "standard",
