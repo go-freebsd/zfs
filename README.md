@@ -5,9 +5,10 @@ libzfs, no libzfs_core, no cgo. The sibling of
 [go-freebsd/jail](https://github.com/go-freebsd/jail).
 
 > **Status: work in progress.** Reading, properties, creating, snapshots,
-> clones, holds, bookmarks, destroy, rename, rollback, promote and encryption
-> keys work and are tested against a real pool on FreeBSD 14.3 and 15.0. Mounting
-> and send/receive are next. Nothing here is released yet. Needs Go 1.23.
+> clones, holds, bookmarks, destroy, rename, rollback, promote, encryption keys
+> and send/receive of single-snapshot streams work and are tested against a real
+> pool on FreeBSD 14.3 and 15.0. Mounting and replication streams (`send -R`/`-p`)
+> are next. Nothing here is released yet. Needs Go 1.23.
 
 | Package | What it is |
 |---|---|
@@ -67,6 +68,50 @@ Errors are `*OpError` and match `errors.Is` with `ErrNotFound`, `ErrExists`,
 (`*primitives.BatchError` with the per-item errno, `*ioctl.Error`) stays reachable
 with `errors.As`.
 
+## Send and receive
+
+Streams go through `io.Writer` and `io.Reader`, so they can be piped to `ssh`, a file,
+an object store or `zstd`. An `*os.File` (a file, a pipe, a socket's `File()`) is handed
+to the kernel directly; anything else is fed through a pipe.
+
+```go
+// zfs send -i -c -L tank/data@new | ssh backup zfs receive -s tank/backup/data
+err = snap.Send(ctx, stdin, zfs.SendFrom(old), zfs.Compressed(), zfs.LargeBlocks())
+
+// the other end
+got, err := c.Dataset("tank/backup/data").Receive(ctx, os.Stdin, zfs.Resumable(),
+    zfs.WithMountpoint("none"), zfs.WithCompression(zfs.ZSTD))
+
+n, err := snap.SendSize(zfs.Compressed())                    // zfs send -n
+err = snap.Send(ctx, w, zfs.Raw())                           // zfs send -w: stays encrypted
+err = snap.Send(ctx, w, zfs.SendIntermediates(first))        // all snapshots between, in order
+err = snap.Send(ctx, w, zfs.OnProgress(time.Second, func(p zfs.SendProgress) { ... }))
+
+token, ok, _ := dst.ResumeToken()                            // after an interrupted receive -s
+err = c.ResumeSend(ctx, w, token)                            // zfs send -t
+bm, _ := snap.Redact("red", clonedSnapshot)                  // zfs redact
+err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redact
+```
+
+| zfs(8) | here |
+|---|---|
+| `send`, `-i`, `-I` | `Snapshot.Send`, `SendFrom`, `SendIntermediates` |
+| `-L` `-e` `-c` `-w` | `LargeBlocks`, `EmbeddedData`, `Compressed`, `Raw` |
+| `-n` | `Snapshot.SendSize` |
+| `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
+| `receive`, `-F` `-s` `-c` | `Dataset.Receive`, `Force`, `Resumable`, `Heal` |
+| `-o prop=` `-o origin=` | property options, `WithOrigin` |
+| `-d` `-e`, `-A` | `DiscardPool`, `LastElement`, `Dataset.AbortResume` |
+
+Streams made here are byte for byte the streams `zfs send` makes, and the CI feeds them to
+`zfs receive` and the other way round. **Replication streams are not supported**: what
+`zfs send -R`, `-p` and `-I` write is a header, a list of filesystems and properties, and
+several streams, which libzfs takes apart in userland. `Receive` refuses them with
+`ErrReplicationStream` and creates nothing; `SendIntermediates` writes the plain
+streams one after the other instead, which `Receive` and `zfs receive` both take.
+`-x` (exclude a property), `-u`, `-n`/`-v` of receive and mounting the result are not
+covered. `Heal` is passed to the kernel but is not tested against a corrupted pool.
+
 Datasets are created but not mounted: the kernel only creates them. Context is
 accepted where a call can take many kernel round trips (listings, `SnapshotAll`);
 a single ioctl cannot be cancelled. One `SnapshotAll` call takes one snapshot per
@@ -105,6 +150,7 @@ covered yet.
 | `CREATE`, `CLONE` | `Create`, `CreateVolume`, `Clone` |
 | `SNAPSHOT`, `DESTROY_SNAPS`, `DESTROY` | `Snapshot`, `DestroySnapshots`, `Destroy` |
 | `RENAME`, `ROLLBACK`, `PROMOTE` | `Rename`, `Rollback`, `Promote` |
+| `SEND_NEW`, `SEND_SPACE`, `SEND_PROGRESS`, `RECV_NEW`, `REDACT` | `Send`, `SendFD`, `SendSize`, `SendProgress`, `Receive`, `ReceiveFD`, `Redact` |
 | `LOAD_KEY`, `UNLOAD_KEY`, `CHANGE_KEY` | `LoadKey`, `CheckKey`, `UnloadKey`, `ChangeKey`, `InheritKey` |
 | everything else | `ioctl.Conn.Call` / `Do` / `Ioctl` |
 
