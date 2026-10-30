@@ -24,10 +24,21 @@ type fakeKernel struct {
 	nextTok uint64
 	calls   []string
 
+	sets     []setCall                // SET_PROP requests received
+	inherits []inheritCall            // INHERIT_PROP requests received
+	setFail  map[string]syscall.Errno // properties the "kernel" refuses
+
 	// hook, if set, runs before a call is served; a non-nil error is returned.
 	hook func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error
 	n    int
 }
+
+type setCall struct {
+	dataset string
+	props   *nvlist.List
+}
+
+type inheritCall struct{ dataset, prop string }
 
 type fakeDS struct {
 	name      string
@@ -150,6 +161,27 @@ func (k *fakeKernel) Do(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist
 
 	case ioctl.IOCDatasetListNext, ioctl.IOCSnapshotListNext:
 		return k.listNext(ioc, cmd, in)
+
+	case ioctl.IOCSetProp:
+		name := cmd.GetName()
+		if _, ok := k.ds[name]; !ok {
+			return nil, k.fail(ioc, name, syscall.ENOENT)
+		}
+		k.sets = append(k.sets, setCall{name, in})
+		var refused *nvlist.List
+		for _, p := range in.Names() {
+			if e, bad := k.setFail[p]; bad {
+				if refused == nil {
+					refused = nvlist.New()
+				}
+				refused.Add(p, int32(e))
+			}
+		}
+		if refused != nil {
+			// As the kernel does: the failing call still returns the list.
+			return nil, &ioctl.Error{Ioc: ioc, Name: name, Errno: syscall.EINVAL, Detail: refused}
+		}
+		return nil, nil
 
 	case ioctl.IOCPoolConfigs:
 		out := nvlist.New()
@@ -281,12 +313,16 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 func (k *fakeKernel) Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error {
 	k.n++
 	k.calls = append(k.calls, ioc.String()+" "+cmd.GetName())
-	if ioc != ioctl.IOCSpaceWritten {
-		k.t.Fatalf("fake: unexpected Ioctl(%v)", ioc)
-	}
 	if _, ok := k.ds[cmd.GetName()]; !ok {
 		return k.fail(ioc, cmd.GetName(), syscall.ENOENT)
 	}
-	cmd.Cookie, cmd.ObjsetType, cmd.PermAction = 1000, 500, 2000
+	switch ioc {
+	case ioctl.IOCSpaceWritten:
+		cmd.Cookie, cmd.ObjsetType, cmd.PermAction = 1000, 500, 2000
+	case ioctl.IOCInheritProp:
+		k.inherits = append(k.inherits, inheritCall{cmd.GetName(), cmd.GetValue()})
+	default:
+		k.t.Fatalf("fake: unexpected Ioctl(%v)", ioc)
+	}
 	return nil
 }

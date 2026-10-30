@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"syscall"
+
+	"github.com/go-freebsd/nvlist/pkg/nvlist"
 )
 
 // ErrUnsupported is returned on platforms other than FreeBSD.
@@ -18,6 +20,10 @@ type Error struct {
 	Ioc   IOC
 	Name  string // zc_name: the pool or dataset the call was about
 	Errno syscall.Errno
+	// Detail is the list the kernel returned together with the error, if any.
+	// For calls that act on several items (set properties, snapshots, holds)
+	// it maps each failed item to its own errno (an int32 pair).
+	Detail *nvlist.List
 }
 
 func (e *Error) Error() string {

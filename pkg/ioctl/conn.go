@@ -113,7 +113,12 @@ func (c *Conn) Do(ioc IOC, cmd *Cmd, in *nvlist.List) (*nvlist.List, error) {
 			continue
 		}
 		if err != nil {
-			return nil, c.wrap(ioc, cmd, err)
+			werr := c.wrap(ioc, cmd, err)
+			var e *Error
+			if errors.As(werr, &e) {
+				e.Detail = errorDetail(dst)
+			}
+			return nil, werr
 		}
 		if cmd.NvlistDstFilled == 0 || cmd.NvlistDstSize == 0 {
 			if c.Trace != nil {
@@ -163,4 +168,16 @@ func (c *Conn) wrap(ioc IOC, cmd *Cmd, err error) error {
 		return &Error{Ioc: ioc, Name: cmd.GetName(), Errno: errno}
 	}
 	return err
+}
+
+// errorDetail reads the list a failed call may have left in the destination
+// buffer. FreeBSD does not update zc_nvlist_dst_size or the filled flag when
+// a call fails, so the whole buffer is tried; an untouched (zeroed) buffer
+// decodes as an empty list, which means "no detail".
+func errorDetail(dst []byte) *nvlist.List {
+	l, err := nvlist.Unpack(dst)
+	if err != nil || l.Len() == 0 {
+		return nil
+	}
+	return l
 }

@@ -408,3 +408,30 @@ func TestEINTRIsRepeatedForBothCallStyles(t *testing.T) {
 		t.Errorf("Ioctl: err %v after %d calls", err, calls)
 	}
 }
+
+// A failed call can still carry a list: the per-item errors of SET_PROP.
+func TestErrorCarriesTheKernelsDetailList(t *testing.T) {
+	detail := nvlist.New()
+	detail.Add("recordsize", int32(syscall.EINVAL))
+	c := newConn(func(ioc IOC, cmd *Cmd, b *buffers) error {
+		// What FreeBSD does on failure: fills the buffer, reports no size.
+		out := packed(t, detail)
+		copy(b.dst, out)
+		return syscall.EINVAL
+	})
+	_, err := c.Call(IOCSetProp, "tank/fs", nil)
+	var e *Error
+	if !errors.As(err, &e) || e.Errno != syscall.EINVAL {
+		t.Fatalf("err = %v", err)
+	}
+	if !reflect.DeepEqual(e.Detail, detail) {
+		t.Errorf("detail = %v, want %v", e.Detail, detail)
+	}
+
+	// An untouched buffer is not a detail list.
+	c = newConn(func(IOC, *Cmd, *buffers) error { return syscall.EBUSY })
+	_, err = c.Call(IOCDestroy, "tank/fs", nil)
+	if !errors.As(err, &e) || e.Detail != nil {
+		t.Errorf("empty buffer must give no detail: %+v", e)
+	}
+}
