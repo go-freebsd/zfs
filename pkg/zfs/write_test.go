@@ -261,6 +261,9 @@ func TestSnapshot(t *testing.T) {
 	if err := c.Snapshot([]string{"tank/a@y"}, map[string]any{"compression": "lz4"}); err == nil {
 		t.Error("non-user property on a snapshot accepted")
 	}
+	if err := c.Snapshot([]string{"tank/a@p", "tank/a@q"}, nil); !errors.Is(err, syscall.EXDEV) {
+		t.Errorf("two snapshots of one dataset: %v", err)
+	}
 	if err := c.Snapshot(nil, nil); err == nil {
 		t.Error("empty list accepted")
 	}

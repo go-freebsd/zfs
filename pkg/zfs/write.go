@@ -233,10 +233,17 @@ func (c *Client) Snapshot(names []string, props map[string]any) error {
 		return err
 	}
 	snaps := nvlist.New()
+	owner := map[string]string{}
 	for _, n := range names {
-		if !strings.Contains(n, "@") {
+		ds, _, found := strings.Cut(n, "@")
+		if !found {
 			return fmt.Errorf("zfs: snapshot: %q is not a snapshot name", n)
 		}
+		// The kernel refuses a second snapshot of one dataset with EXDEV.
+		if prev, dup := owner[ds]; dup {
+			return fmt.Errorf("zfs: snapshot: %s and %s are of the same dataset, one call takes one snapshot per dataset: %w", prev, n, syscall.EXDEV)
+		}
+		owner[ds] = n
 		snaps.Add(n, nvlist.Flag{})
 	}
 	in := nvlist.New()

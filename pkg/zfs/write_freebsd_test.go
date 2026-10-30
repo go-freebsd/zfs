@@ -13,6 +13,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/go-freebsd/nvlist/pkg/nvlist"
+	"github.com/go-freebsd/zfs/pkg/ioctl"
 )
 
 // These tests write with this library and read back with zfs(8) (and the
@@ -324,23 +327,26 @@ func TestSnapshotCloneRollbackPromoteDestroy(t *testing.T) {
 	if err := c.Create(ds+"/kid", &CreateOptions{Props: map[string]any{"mountpoint": "none"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Snapshot([]string{ds + "@a", ds + "/kid@a", ds + "@b"}, map[string]any{"test:why": "unit"}); err != nil {
+	if err := c.Snapshot([]string{ds + "@a", ds + "/kid@a"}, map[string]any{"test:why": "unit"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{ds + "@a", ds + "/kid@a", ds + "@b"} {
+	for _, s := range []string{ds + "@a", ds + "/kid@a"} {
 		if got := zget(t, s, "test:why")["test:why"]; got != "unit" {
 			t.Errorf("%s: test:why = %q", s, got)
 		}
 	}
 	// All or nothing, and the kernel's per-item list reaches us.
-	err := c.Snapshot([]string{ds + "@new", ds + "@a"}, nil)
+	if err := c.Snapshot([]string{ds + "@b"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	err := c.Snapshot([]string{ds + "/kid@new", ds + "@a"}, nil)
 	var be *BatchError
 	if !errors.As(err, &be) || !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("duplicate snapshot: %v", err)
 	}
 	t.Logf("duplicate snapshot: %v", err)
-	if ok, _ := c.Exists(ds + "@new"); ok {
-		t.Error("ds@new was created although ds@a failed")
+	if ok, _ := c.Exists(ds + "/kid@new"); ok {
+		t.Error("kid@new was created although ds@a failed")
 	}
 	if err := c.Snapshot([]string{ds + "@nope" + "x/y"}, nil); err == nil {
 		t.Error("an invalid snapshot name was accepted")
@@ -540,12 +546,31 @@ func TestSnapshotRequestShapes(t *testing.T) {
 		{"one", []string{ds + "@one"}, nil},
 		{"one with prop", []string{ds + "@two"}, map[string]any{"test:p": "v"}},
 		{"two datasets", []string{ds + "@three", ds + "/kid@three"}, nil},
-		{"two snaps of one dataset", []string{ds + "@four", ds + "@five"}, nil},
 		{"two datasets with prop", []string{ds + "@six", ds + "/kid@six"}, map[string]any{"test:p": "v"}},
 	}
 	for _, s := range shapes {
 		if err := c.Snapshot(s.snaps, s.props); err != nil {
 			t.Errorf("%s: %v", s.name, err)
 		}
+	}
+}
+
+func TestSnapshotsOfOneDatasetNeedSeparateCalls(t *testing.T) {
+	c, pool := testClient(t)
+	ds := wds(t, pool, "samedataset")
+	if err := c.Create(ds, &CreateOptions{Props: map[string]any{"mountpoint": "none"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Snapshot([]string{ds + "@x", ds + "@y"}, nil); !errors.Is(err, syscall.EXDEV) {
+		t.Errorf("err = %v, want EXDEV", err)
+	}
+	// The kernel says the same when asked directly.
+	in := nvlist.New()
+	snaps := nvlist.New()
+	snaps.Add(ds+"@x", nvlist.Flag{})
+	snaps.Add(ds+"@y", nvlist.Flag{})
+	in.Add("snaps", snaps)
+	if _, err := c.c.Call(ioctl.IOCSnapshot, pool, in); !errors.Is(err, syscall.EXDEV) {
+		t.Errorf("kernel: %v, want EXDEV", err)
 	}
 }
