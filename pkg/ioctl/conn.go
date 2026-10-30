@@ -181,3 +181,67 @@ func errorDetail(dst []byte) *nvlist.List {
 	}
 	return l
 }
+
+// ErrTruncated is returned by DoOnce when the call succeeded but its output
+// list did not fit the buffer. The operation has happened and is not repeated.
+var ErrTruncated = errors.New("zfs ioctl: output list did not fit the buffer")
+
+const onceDstSize = 1 << 20
+
+// DoOnce runs an ioctl exactly once. Unlike Do it does not repeat the call
+// on EINTR, on ENOMEM or when the kernel asks for a larger buffer, because
+// the calls it is meant for (send and receive move a stream through a file
+// descriptor) must not run twice. dstSize is the size of the output buffer
+// (1 MiB if not positive). The error detail of a failed call is read as in
+// Do.
+func (c *Conn) DoOnce(ioc IOC, cmd *Cmd, in *nvlist.List, dstSize int) (*nvlist.List, error) {
+	var src []byte
+	if in != nil {
+		var err error
+		if src, err = nvlist.Pack(in); err != nil {
+			return nil, err
+		}
+	}
+	if dstSize <= 0 {
+		dstSize = onceDstSize
+	}
+	dst := make([]byte, dstSize)
+	cmd.NvlistSrc, cmd.NvlistSrcSize = ptr(src), uint64(len(src))
+	cmd.NvlistDst, cmd.NvlistDstSize, cmd.NvlistDstFilled = ptr(dst), uint64(dstSize), 0
+
+	err := c.do(ioc, cmd, &buffers{src: src, dst: dst})
+	runtime.KeepAlive(src)
+	runtime.KeepAlive(dst)
+
+	if err != nil {
+		werr := c.wrap(ioc, cmd, err)
+		var e *Error
+		if errors.As(werr, &e) {
+			e.Detail = errorDetail(dst)
+		}
+		return nil, werr
+	}
+	if cmd.NvlistDstSize > uint64(dstSize) {
+		return nil, ErrTruncated
+	}
+	if cmd.NvlistDstFilled == 0 || cmd.NvlistDstSize == 0 {
+		if c.Trace != nil {
+			c.Trace(ioc, cmd.GetName(), src, nil)
+		}
+		return nil, nil
+	}
+	out := dst[:cmd.NvlistDstSize]
+	if c.Trace != nil {
+		c.Trace(ioc, cmd.GetName(), src, out)
+	}
+	return nvlist.Unpack(out)
+}
+
+// CallOnce is DoOnce on the named pool or dataset.
+func (c *Conn) CallOnce(ioc IOC, name string, in *nvlist.List) (*nvlist.List, error) {
+	cmd := NewCmd()
+	if err := cmd.SetName(name); err != nil {
+		return nil, err
+	}
+	return c.DoOnce(ioc, cmd, in, 0)
+}

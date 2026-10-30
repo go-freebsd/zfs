@@ -27,6 +27,9 @@ type fakeKernel struct {
 	writes   []writeCall         // create/destroy/rename/... requests received
 	writeErr map[ioctl.IOC]error // errors to return for them
 	writeOut map[ioctl.IOC]*nvlist.List
+	sendData map[string][]byte // stream bytes a send of a snapshot (or "from>to") writes
+	received [][]byte          // payload bytes of each received stream
+	progress uint64
 	sets     []setCall                // SET_PROP requests received
 	inherits []inheritCall            // INHERIT_PROP requests received
 	setFail  map[string]syscall.Errno // properties the "kernel" refuses
@@ -48,7 +51,8 @@ func isWriteIOC(ioc ioctl.IOC) bool {
 	switch ioc {
 	case ioctl.IOCCreate, ioctl.IOCDestroy, ioctl.IOCRollback, ioctl.IOCRename, ioctl.IOCPromote,
 		ioctl.IOCSnapshot, ioctl.IOCHold, ioctl.IOCRelease, ioctl.IOCDestroySnaps, ioctl.IOCClone,
-		ioctl.IOCBookmark, ioctl.IOCDestroyBookmarks, ioctl.IOCLoadKey, ioctl.IOCUnloadKey, ioctl.IOCChangeKey:
+		ioctl.IOCBookmark, ioctl.IOCDestroyBookmarks, ioctl.IOCLoadKey, ioctl.IOCUnloadKey, ioctl.IOCChangeKey,
+		ioctl.IOCSendNew, ioctl.IOCRecvNew, ioctl.IOCSendSpace, ioctl.IOCRedact, ioctl.IOCSendProgress:
 		return true
 	}
 	return false
@@ -348,9 +352,64 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 	return nil, nil
 }
 
+// CallOnce serves send and receive: it moves bytes through the descriptor
+// the request names, like the kernel does.
+func (k *fakeKernel) CallOnce(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.List, error) {
+	k.n++
+	k.calls = append(k.calls, ioc.String()+" "+name)
+	cmd := ioctl.NewCmd()
+	cmd.SetName(name)
+	out, err := k.write(ioc, cmd, in)
+	if err != nil {
+		return nil, err
+	}
+	switch ioc {
+	case ioctl.IOCSendNew:
+		fd, _ := in.Int32("fd")
+		data := k.sendData[name]
+		if from, ok := in.String("fromsnap"); ok {
+			data = k.sendData[from+">"+name]
+		}
+		for len(data) > 0 {
+			n, werr := syscall.Write(int(fd), data)
+			if werr != nil {
+				return nil, &ioctl.Error{Ioc: ioc, Name: name, Errno: werr.(syscall.Errno)}
+			}
+			data = data[n:]
+		}
+	case ioctl.IOCRecvNew:
+		fd, _ := in.Int32("input_fd")
+		rec, _ := in.Get("begin_record")
+		bytes := rec.([]nvlist.Byte)
+		want := int(bytes[4]) | int(bytes[5])<<8 | int(bytes[6])<<16 | int(bytes[7])<<24 // drr_payloadlen, little endian host
+		body := make([]byte, 0, want)
+		buf := make([]byte, 4096)
+		for len(body) < want {
+			n, rerr := syscall.Read(int(fd), buf[:min(len(buf), want-len(body))])
+			if rerr != nil || n == 0 {
+				return nil, &ioctl.Error{Ioc: ioc, Name: name, Errno: syscall.EPIPE}
+			}
+			body = append(body, buf[:n]...)
+		}
+		k.received = append(k.received, body)
+		if out == nil {
+			out = nvlist.New()
+			out.Add("read_bytes", uint64(want+312))
+			out.Add("error_flags", uint64(0))
+			out.Add("errors", nvlist.New())
+		}
+	}
+	return out, nil
+}
+
 func (k *fakeKernel) Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error {
 	k.n++
 	k.calls = append(k.calls, ioc.String()+" "+cmd.GetName())
+	if ioc == ioctl.IOCSendProgress {
+		k.writes = append(k.writes, writeCall{ioc, cmd.GetName(), "", cmd.Cookie, nil})
+		cmd.Cookie, cmd.ObjsetType = k.progress, k.progress/512
+		return k.writeErr[ioc]
+	}
 	if isWriteIOC(ioc) {
 		_, err := k.write(ioc, cmd, nil)
 		return err
