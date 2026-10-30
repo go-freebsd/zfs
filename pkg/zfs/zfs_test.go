@@ -1,8 +1,10 @@
 package zfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"reflect"
 	"strings"
@@ -404,3 +406,160 @@ func TestTypedConstantsAreInTheTable(t *testing.T) {
 }
 
 func GIB() uint64 { return GiB }
+
+func TestSendOptionsMapToTheStream(t *testing.T) {
+	c, s := newStub()
+	snap, base := c.Snapshot("tank/a@new"), c.Snapshot("tank/a@old")
+	var buf bytes.Buffer
+	var got []SendProgress
+	err := snap.Send(context.Background(), &buf, SendFrom(base), LargeBlocks(), EmbeddedData(), Compressed(), Raw(),
+		RedactedWith(c.Bookmark("tank/a#red")), OnProgress(50*time.Millisecond, func(p SendProgress) { got = append(got, p) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := s.sendOpts
+	if s.last() != "Send tank/a@new" || s.writer != &buf {
+		t.Errorf("call = %q", s.last())
+	}
+	if o.From != "tank/a@old" || o.Intermediates || !o.LargeBlocks || !o.EmbedData || !o.Compress || !o.Raw || o.Saved ||
+		o.RedactBookmark != "tank/a#red" || o.ProgressInterval != 50*time.Millisecond || o.Progress == nil {
+		t.Errorf("options = %+v", o)
+	}
+	o.Progress(SendProgress{Bytes: 7})
+	if len(got) != 1 || got[0].Bytes != 7 {
+		t.Error("the progress callback is not the caller's")
+	}
+
+	if err := snap.Send(context.Background(), &buf, SendIntermediates(base)); err != nil {
+		t.Fatal(err)
+	}
+	if o := s.sendOpts; o.From != "tank/a@old" || !o.Intermediates {
+		t.Errorf("intermediates = %+v", o)
+	}
+	if err := snap.Send(context.Background(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	if o := s.sendOpts; !reflect.DeepEqual(*o, primitives.SendOptions{}) {
+		t.Errorf("a plain send carries options: %+v", o)
+	}
+
+	n, err := snap.SendSize(SendFrom(base), Compressed())
+	if err != nil || n != 4242 || s.last() != "SendSize tank/a@new" || s.sendOpts.From != "tank/a@old" || !s.sendOpts.Compress {
+		t.Errorf("SendSize = %d, %v, %+v", n, err, s.sendOpts)
+	}
+
+	if err := c.Dataset("tank/a").SendSaved(context.Background(), &buf, Compressed()); err != nil {
+		t.Fatal(err)
+	}
+	if s.last() != "Send tank/a" || !s.sendOpts.Saved || !s.sendOpts.Compress {
+		t.Errorf("SendSaved: %q %+v", s.last(), s.sendOpts)
+	}
+
+	if err := c.ResumeSend(context.Background(), &buf, "1-abc-2-00", Compressed()); err != nil {
+		t.Fatal(err)
+	}
+	if s.last() != "ResumeSend 1-abc-2-00" || !s.sendOpts.Compress {
+		t.Errorf("ResumeSend: %q", s.last())
+	}
+}
+
+func TestRedactNamesTheBookmark(t *testing.T) {
+	c, s := newStub()
+	bm, err := c.Snapshot("tank/a@new").Redact("red", c.Snapshot("tank/clone@r1"), c.Snapshot("tank/clone2@r2"))
+	if err != nil || bm.Name() != "tank/a#red" {
+		t.Fatalf("Redact = %v, %v", bm, err)
+	}
+	if s.last() != "Redact tank/a@new tank/a#red [tank/clone@r1 tank/clone2@r2]" {
+		t.Errorf("call = %q", s.last())
+	}
+	if bm, _ := c.Snapshot("tank/a@new").Redact("#r2", c.Snapshot("tank/clone@r1")); bm.Name() != "tank/a#r2" {
+		t.Errorf("a # prefix is not stripped: %s", bm.Name())
+	}
+}
+
+func TestReceiveOptionsMapToTheKernel(t *testing.T) {
+	c, s := newStub()
+	got, err := c.Dataset("tank/backup/a").Receive(context.Background(), strings.NewReader("x"),
+		Force(), Resumable(), Heal(), WithOrigin(c.Snapshot("tank/a@o")), WithCompression(LZ4), WithMountpoint("none"),
+		WithProp("note:from", "x"), Parents(), DiscardPool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Snapshot != "tank/backup/a@got" || s.last() != "Receive tank/backup/a" {
+		t.Errorf("result %+v, call %q", got, s.last())
+	}
+	o := s.recvOpts
+	if !o.Force || !o.Resumable || !o.Heal || o.Origin != "tank/a@o" || !o.Parents || o.Layout != primitives.LayoutDiscardPool {
+		t.Errorf("options = %+v", o)
+	}
+	want := map[string]any{"compression": "lz4", "mountpoint": "none", "note:from": "x"}
+	if !reflect.DeepEqual(o.Props, want) {
+		t.Errorf("props = %v", o.Props)
+	}
+	if _, err := c.Dataset("tank/backup/b").Receive(context.Background(), strings.NewReader("x"), LastElement()); err != nil || s.recvOpts.Layout != primitives.LayoutLastElement {
+		t.Errorf("LastElement: %v %+v", err, s.recvOpts)
+	}
+	if _, err := c.Snapshot("tank/backup/c@mine").Receive(context.Background(), strings.NewReader("x")); err != nil || s.last() != "Receive tank/backup/c@mine" {
+		t.Errorf("snapshot target: %v %q", err, s.last())
+	}
+
+	s.token = "1-ab-1-00"
+	if tok, ok, err := c.Dataset("tank/backup/a").ResumeToken(); !ok || err != nil || tok != "1-ab-1-00" {
+		t.Errorf("ResumeToken = %q %v %v", tok, ok, err)
+	}
+	if err := c.Dataset("tank/backup/a").AbortResume(); err != nil || s.last() != "AbortResume tank/backup/a" {
+		t.Errorf("AbortResume: %v %q", err, s.last())
+	}
+}
+
+func TestStreamOptionMisuse(t *testing.T) {
+	c, s := newStub()
+	ctx := context.Background()
+	d, snap := c.Dataset("tank/a"), c.Snapshot("tank/a@x")
+	key := RawKey(make([]byte, 32))
+	cases := map[string]func() error{
+		"send option to Receive": func() error { _, err := d.Receive(ctx, strings.NewReader(""), Compressed()); return err },
+		"receive option to Send": func() error { return snap.Send(ctx, io.Discard, Force()) },
+		"Resumable to Send":      func() error { return snap.Send(ctx, io.Discard, Resumable()) },
+		"send option to Set":     func() error { return d.Set(Raw()) },
+		"send option to Create":  func() error { _, err := d.CreateFilesystem("x", LargeBlocks()); return err },
+		"encryption to Receive": func() error {
+			_, err := d.Receive(ctx, strings.NewReader(""), WithEncryption(AES256GCM, key))
+			return err
+		},
+		"Recursive to Receive":      func() error { _, err := d.Receive(ctx, strings.NewReader(""), Recursive()); return err },
+		"property to Send":          func() error { return snap.Send(ctx, io.Discard, WithCompression(LZ4)) },
+		"layout to SendSize":        func() error { _, err := snap.SendSize(DiscardPool()); return err },
+		"send option to ResumeSend": func() error { return c.ResumeSend(ctx, io.Discard, "x", Force()) },
+	}
+	for name, f := range cases {
+		if err := f(); !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if len(s.calls) != 0 {
+		t.Errorf("calls were made: %v", s.calls)
+	}
+}
+
+func TestStreamErrorsClassify(t *testing.T) {
+	c, s := newStub()
+	s.err = primitives.ErrCompoundStream
+	_, err := c.Dataset("tank/a").Receive(context.Background(), strings.NewReader(""))
+	if !errors.Is(err, ErrReplicationStream) {
+		t.Errorf("replication stream: %v", err)
+	}
+	s.err = &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: "tank", Errno: ioctl.ErrStreamTruncated}
+	err = c.Snapshot("tank/a@x").Send(context.Background(), io.Discard)
+	if !errors.Is(err, ErrStreamTruncated) {
+		t.Errorf("truncated: %v", err)
+	}
+	var oe *OpError
+	if !errors.As(err, &oe) || oe.Op != "send" || !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("error = %v", err)
+	}
+	s.err = &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: "tank", Errno: syscall.EEXIST}
+	if _, err := c.Dataset("tank/a").Receive(context.Background(), strings.NewReader("")); !errors.Is(err, ErrExists) {
+		t.Errorf("exists: %v", err)
+	}
+}

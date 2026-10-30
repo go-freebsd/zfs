@@ -5,9 +5,11 @@ package zfs
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -463,3 +465,362 @@ func TestScenarioErrors(t *testing.T) {
 		t.Errorf("snapshot with a property option: %v", err)
 	}
 }
+
+// Send and receive through the handle API, with zfs(8) as the oracle.
+
+func guidOf(t *testing.T, name string) string { return zget(t, name, "guid")["guid"] }
+
+// mountedSource makes a filesystem with files, mounted below a temp directory.
+func mountedSource(t *testing.T, pool *Dataset, name string, files map[string]string, opts ...Option) *Dataset {
+	t.Helper()
+	dir := t.TempDir()
+	ds, err := pool.CreateFilesystem(scratch(t, pool, name), append([]Option{WithMountpoint(dir)}, opts...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "zfs", "mount", ds.Name())
+	for f, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return ds
+}
+
+func TestScenarioSendReceive(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	src := mountedSource(t, pool, "sr_src", map[string]string{"one": "first", "two": strings.Repeat("y", 100000)}, WithCompression(LZ4))
+	a, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "sh", "-c", "echo changed > "+zget(t, src.Name(), "mountpoint")["mountpoint"]+"/one")
+	b, err := src.Snapshot("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Full and incremental, into a buffer and back.
+	var full, incr bytes.Buffer
+	if err := a.Send(ctx, &full); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Send(ctx, &incr, SendFrom(a), Compressed()); err != nil {
+		t.Fatal(err)
+	}
+	h, err := ReadStreamHeader(bytes.NewReader(full.Bytes()))
+	if err != nil || h.ToName != a.Name() || h.Incremental() {
+		t.Fatalf("header %+v %v", h, err)
+	}
+	dst := pool.Child("sr_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	got, err := dst.Receive(ctx, &full, WithMountpoint("none"), WithProp("note:from", "src"))
+	if err != nil || len(got) != 1 || got[0].Snapshot != dst.Name()+"@a" || got[0].Bytes == 0 {
+		t.Fatalf("Receive = %+v, %v", got, err)
+	}
+	if _, err := dst.Receive(ctx, &incr); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"a", "b"} {
+		if guidOf(t, dst.Name()+"@"+s) != guidOf(t, src.Name()+"@"+s) {
+			t.Errorf("guid of @%s differs", s)
+		}
+	}
+	check(t, dst.Name(), map[string]string{"note:from": "src", "mountpoint": "none"})
+	if _, err := dst.Receive(ctx, bytes.NewReader(full.Bytes())); !errors.Is(err, ErrExists) {
+		t.Errorf("full stream into an existing dataset: %v", err)
+	}
+
+	// Estimates are what zfs send -n says.
+	for _, tc := range []struct {
+		opts []Option
+		args []string
+	}{
+		{nil, []string{b.Name()}},
+		{[]Option{SendFrom(a)}, []string{"-i", a.Name(), b.Name()}},
+		{[]Option{Compressed(), LargeBlocks()}, []string{"-c", "-L", b.Name()}},
+	} {
+		n, err := b.SendSize(tc.opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := cli(t, "zfs", append([]string{"send", "-nP"}, tc.args...)...)
+		if !strings.Contains(out, "size\t"+strconv.FormatUint(n, 10)) || n == 0 {
+			t.Errorf("SendSize(%v) = %d, zfs send -nP says %q", tc.args, n, out)
+		}
+	}
+
+	// Through files: the kernel reads and writes the descriptors directly.
+	path := filepath.Join(t.TempDir(), "stream")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Send(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	in, _ := os.Open(path)
+	defer in.Close()
+	dst2 := pool.Child("sr_dst2")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst2.Name()).Run() })
+	if _, err := dst2.Receive(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if guidOf(t, dst2.Name()+"@a") != guidOf(t, a.Name()) {
+		t.Error("guid differs through files")
+	}
+
+	// Layouts: the stream's path rebuilt below a parent.
+	parent := scratch(t, pool, "sr_parent")
+	if _, err := pool.CreateFilesystem(parent, WithMountpoint("none")); err != nil {
+		t.Fatal(err)
+	}
+	var again bytes.Buffer
+	if err := a.Send(ctx, &again); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Child(parent).Receive(ctx, &again, DiscardPool(), Parents()); err != nil {
+		t.Fatal(err)
+	}
+	// "<pool>/sr_src@a" below the parent without the pool name.
+	if ok, _ := c.Dataset(pool.Name() + "/" + parent + "/sr_src").Exists(); !ok {
+		t.Errorf("DiscardPool did not rebuild the path below %s: %v", parent, zlist(t, "-r", pool.Name()+"/"+parent))
+	}
+}
+
+func TestScenarioSendIntermediatesAndReplicationStreams(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	src := mountedSource(t, pool, "im_src", map[string]string{"f": "0"})
+	var snaps []*Snapshot
+	for _, n := range []string{"a", "b", "c", "d"} {
+		os.WriteFile(filepath.Join(zget(t, src.Name(), "mountpoint")["mountpoint"], "f"), []byte(n), 0o644)
+		s, err := src.Snapshot(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snaps = append(snaps, s)
+	}
+	var base, rest bytes.Buffer
+	if err := snaps[0].Send(ctx, &base); err != nil {
+		t.Fatal(err)
+	}
+	if err := snaps[3].Send(ctx, &rest, SendIntermediates(snaps[0])); err != nil {
+		t.Fatal(err)
+	}
+	dst := pool.Child("im_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	if _, err := dst.Receive(ctx, &base); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dst.Receive(ctx, &rest)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("received %d streams, %v", len(got), err)
+	}
+	for _, s := range snaps {
+		if guidOf(t, dst.Name()+"@"+s.ShortName()) != guidOf(t, s.Name()) {
+			t.Errorf("@%s differs", s.ShortName())
+		}
+	}
+
+	// What zfs send -I and -R write is refused, and nothing is created.
+	for _, args := range [][]string{{"-I", snaps[0].Name(), snaps[3].Name()}, {"-R", snaps[0].Name()}} {
+		out, err := exec.Command("zfs", append([]string{"send"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("zfs send %v: %v", args, err)
+		}
+		target := pool.Child("im_refused")
+		if _, err := target.Receive(ctx, bytes.NewReader(out)); !errors.Is(err, ErrReplicationStream) {
+			t.Errorf("zfs send %v: %v", args, err)
+		}
+		if ok, _ := target.Exists(); ok {
+			t.Error("a dataset was made from a refused stream")
+		}
+	}
+	// And garbage is not a stream.
+	if _, err := pool.Child("im_garbage").Receive(ctx, strings.NewReader(strings.Repeat("not a stream ", 100))); !errors.Is(err, ErrNotAStream) {
+		t.Errorf("garbage: %v", err)
+	}
+	_ = c
+}
+
+func TestScenarioRawEncryptedSend(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	const pass = "correct horse battery staple"
+	src, err := pool.CreateFilesystem(scratch(t, pool, "rw_src"), WithEncryption(AES256GCM, PassphraseKey(pass)), WithMountpoint("none"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw bytes.Buffer
+	if err := snap.Send(ctx, &raw, Raw()); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := ReadStreamHeader(bytes.NewReader(raw.Bytes())); h == nil || !h.Raw() {
+		t.Fatalf("not a raw stream: %+v", h)
+	}
+	dst := pool.Child("rw_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	if _, err := dst.Receive(ctx, &raw); err != nil {
+		t.Fatal(err)
+	}
+	info, err := dst.Info()
+	if err != nil || !info.Encrypted() || info.KeyStatus != KeyUnavailable || info.Encryption != AES256GCM {
+		t.Fatalf("received: %+v %v", info, err)
+	}
+	if err := dst.LoadKey(PassphraseKey(pass)); err != nil {
+		t.Fatalf("LoadKey of a raw received dataset: %v", err)
+	}
+	_ = c
+}
+
+func TestScenarioResumeAndProgress(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	data := make([]byte, 12<<20)
+	rand.Read(data)
+	src := mountedSource(t, pool, "rp_src", map[string]string{"blob": string(data)}, WithCompression(CompressionOff))
+	snap, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Progress while sending to a slow writer.
+	var reports int
+	var last SendProgress
+	var whole bytes.Buffer
+	if err := snap.Send(ctx, &slowBuf{Buffer: &whole}, OnProgress(10*time.Millisecond, func(p SendProgress) { reports++; last = p })); err != nil {
+		t.Fatal(err)
+	}
+	if reports == 0 || last.Bytes == 0 || last.Bytes > uint64(whole.Len()) {
+		t.Errorf("progress: %d reports, last %+v, stream %d", reports, last, whole.Len())
+	}
+
+	// Interrupted resumable receive, token, resumed send, rest received.
+	dst := pool.Child("rp_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	cut := whole.Len() / 3
+	if _, err := dst.Receive(ctx, bytes.NewReader(whole.Bytes()[:cut]), Resumable()); err == nil || !errors.Is(err, ErrStreamTruncated) {
+		t.Fatalf("truncated receive: %v", err)
+	}
+	token, ok, err := dst.ResumeToken()
+	if err != nil || !ok {
+		t.Fatalf("ResumeToken: %v %v", ok, err)
+	}
+	if tok, err := ParseResumeToken(token); err != nil || tok.ToName != snap.Name() {
+		t.Errorf("token %+v %v", tok, err)
+	}
+	var rest bytes.Buffer
+	if err := c.ResumeSend(ctx, &rest, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.Receive(ctx, &rest, Resumable()); err != nil {
+		t.Fatal(err)
+	}
+	if guidOf(t, dst.Name()+"@a") != guidOf(t, snap.Name()) {
+		t.Error("guid differs after resuming")
+	}
+
+	// Abort drops the partial state.
+	dst2 := pool.Child("rp_dst2")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst2.Name()).Run() })
+	dst2.Receive(ctx, bytes.NewReader(whole.Bytes()[:cut]), Resumable())
+	if err := dst2.AbortResume(); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := dst2.Exists(); ok {
+		t.Error("the half received dataset survived AbortResume")
+	}
+	if err := dst2.AbortResume(); !errors.Is(err, ErrNotFound) && err == nil {
+		t.Errorf("aborting with nothing to abort: %v", err)
+	}
+}
+
+type slowBuf struct{ *bytes.Buffer }
+
+func (w *slowBuf) Write(p []byte) (int, error) {
+	time.Sleep(15 * time.Millisecond)
+	return w.Buffer.Write(p)
+}
+
+func TestScenarioRedactedSend(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	src := mountedSource(t, pool, "rd_src", map[string]string{"public": "ok", "secret": "classified"})
+	snap, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cdir := t.TempDir()
+	clone, err := snap.Clone(pool.Name()+"/hl_rd_clone", WithMountpoint(cdir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", clone.Name()).Run() })
+	cli(t, "zfs", "mount", clone.Name())
+	os.WriteFile(filepath.Join(cdir, "secret"), []byte("REDACTED"), 0o644)
+	rs, err := clone.Snapshot("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bm, err := snap.Redact("red", rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := snap.Send(ctx, &out, RedactedWith(bm)); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := ReadStreamHeader(bytes.NewReader(out.Bytes()))
+	if h == nil || h.Features&primitives.FeatureRedacted == 0 || bytes.Contains(out.Bytes(), []byte("classified")) {
+		t.Errorf("not a redacted stream: %+v", h)
+	}
+	dst := pool.Child("rd_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	if _, err := dst.Receive(ctx, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := zget(t, dst.Name()+"@a", "redact_snaps")["redact_snaps"]; got == "-" || got == "" {
+		t.Errorf("the received snapshot is not marked redacted")
+	}
+	_ = c
+}
+
+func TestScenarioSendWriterFailsOrContextEnds(t *testing.T) {
+	_, pool := testClient(t)
+	data := make([]byte, 8<<20)
+	rand.Read(data)
+	src := mountedSource(t, pool, "wf_src", map[string]string{"blob": string(data)}, WithCompression(CompressionOff))
+	snap, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snap.Send(context.Background(), &brokenWriter{after: 1 << 20}); err == nil || !strings.Contains(err.Error(), "sink is broken") {
+		t.Errorf("failing writer: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := snap.Send(ctx, &stuckWriter{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("stuck writer: %v", err)
+	}
+}
+
+type brokenWriter struct{ after int }
+
+func (w *brokenWriter) Write(p []byte) (int, error) {
+	if w.after -= len(p); w.after < 0 {
+		return 0, errors.New("sink is broken")
+	}
+	return len(p), nil
+}
+
+// stuckWriter blocks until the test ends, like a network peer that stopped reading.
+type stuckWriter struct{}
+
+func (stuckWriter) Write(p []byte) (int, error) { time.Sleep(time.Hour); return len(p), nil }

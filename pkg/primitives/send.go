@@ -22,10 +22,11 @@ type SendOptions struct {
 	// or just "@a" / "#b". Empty is a full stream.
 	From string
 
-	// Intermediates (zfs send -I) also sends every snapshot between From
-	// and the snapshot, each as its own stream, one after the other. From
-	// must be a snapshot. Without it only the difference between the two is
-	// sent (zfs send -i).
+	// Intermediates (like zfs send -I) also sends every snapshot between
+	// From and the snapshot, each as its own stream, one after the other;
+	// Receive and zfs receive both take that. (zfs send -I itself writes a
+	// replication stream, which Receive refuses.) From must be a snapshot.
+	// Without it only the difference between the two is sent (zfs send -i).
 	Intermediates bool
 
 	LargeBlocks bool // -L: blocks larger than 128 KiB

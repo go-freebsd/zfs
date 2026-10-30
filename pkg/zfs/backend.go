@@ -1,6 +1,11 @@
 package zfs
 
-import "github.com/go-freebsd/zfs/pkg/primitives"
+import (
+	"context"
+	"io"
+
+	"github.com/go-freebsd/zfs/pkg/primitives"
+)
 
 // backend is the part of *primitives.Client this package uses. It exists so
 // the unit tests can record what a call turns into.
@@ -28,6 +33,14 @@ type backend interface {
 
 	SetProps(dataset string, props map[string]any) error
 	InheritProp(dataset, prop string) error
+
+	Send(ctx context.Context, snapshot string, w io.Writer, o *primitives.SendOptions) error
+	SendSize(snapshot string, o *primitives.SendOptions) (uint64, error)
+	ResumeSend(ctx context.Context, w io.Writer, token string, o *primitives.SendOptions) error
+	Redact(snapshot, bookmark string, redactionSnapshots []string) error
+	Receive(ctx context.Context, r io.Reader, target string, o *primitives.ReceiveOptions) ([]primitives.Received, error)
+	ResumeToken(dataset string) (string, bool, error)
+	AbortResume(dataset string) error
 
 	LoadKey(dataset string, key *primitives.Key) error
 	CheckKey(dataset string, key *primitives.Key) error

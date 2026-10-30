@@ -2,7 +2,9 @@ package zfs
 
 import (
 	"fmt"
+	"io"
 
+	"github.com/go-freebsd/zfs/pkg/ioctl"
 	"github.com/go-freebsd/zfs/pkg/primitives"
 )
 
@@ -123,3 +125,35 @@ type Hold = primitives.Hold
 
 // Space is a space accounting result, in bytes.
 type Space = primitives.Space
+
+// Received describes one stream that was received: its header, the name of
+// the snapshot it made, how many bytes the kernel read, and properties of the
+// stream that could not be set.
+type Received = primitives.Received
+
+// StreamHeader is the first record of a send stream.
+type StreamHeader = primitives.StreamHeader
+
+// SendProgress is the state of a running send.
+type SendProgress = primitives.SendProgress
+
+// ResumeToken is a decoded receive_resume_token.
+type ResumeToken = primitives.ResumeToken
+
+// Stream errors.
+var (
+	// ErrReplicationStream is returned for streams made by zfs send -R, -p
+	// or -I: a header and several streams, which libzfs takes apart.
+	ErrReplicationStream = primitives.ErrCompoundStream
+	// ErrNotAStream is returned for input that is not a ZFS send stream.
+	ErrNotAStream = primitives.ErrNotAStream
+	// ErrStreamTruncated is the kernel's answer to a stream that ends early.
+	ErrStreamTruncated = ioctl.ErrStreamTruncated
+)
+
+// ReadStreamHeader reads the first record of a send stream, to see what a
+// stream is before it is received.
+func ReadStreamHeader(r io.Reader) (*StreamHeader, error) { return primitives.ReadStreamHeader(r) }
+
+// ParseResumeToken decodes a receive_resume_token.
+func ParseResumeToken(token string) (*ResumeToken, error) { return primitives.ParseResumeToken(token) }

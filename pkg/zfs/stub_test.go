@@ -1,7 +1,9 @@
 package zfs
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/go-freebsd/zfs/pkg/primitives"
@@ -18,6 +20,10 @@ type stub struct {
 	snapProps  map[string]any
 	destroyOpt *primitives.DestroyOptions
 	key        *primitives.Key
+	sendOpts   *primitives.SendOptions
+	recvOpts   *primitives.ReceiveOptions
+	writer     io.Writer
+	token      string
 
 	// answers
 	err      error                 // returned by every call when set
@@ -139,3 +145,29 @@ func keysOf(m map[string]any) []string {
 func ds(name string, kind primitives.Type, props map[string]primitives.Property) *primitives.Dataset {
 	return &primitives.Dataset{Name: name, Type: kind, Props: props}
 }
+
+// Send and receive.
+
+func (s *stub) Send(ctx context.Context, snapshot string, w io.Writer, o *primitives.SendOptions) error {
+	s.sendOpts, s.writer = o, w
+	return s.rec("Send", snapshot)
+}
+func (s *stub) SendSize(snapshot string, o *primitives.SendOptions) (uint64, error) {
+	s.sendOpts = o
+	return 4242, s.rec("SendSize", snapshot)
+}
+func (s *stub) ResumeSend(ctx context.Context, w io.Writer, token string, o *primitives.SendOptions) error {
+	s.sendOpts = o
+	return s.rec("ResumeSend", token)
+}
+func (s *stub) Redact(snapshot, bookmark string, snaps []string) error {
+	return s.rec("Redact", snapshot, " ", bookmark, " ", snaps)
+}
+func (s *stub) Receive(ctx context.Context, r io.Reader, target string, o *primitives.ReceiveOptions) ([]primitives.Received, error) {
+	s.recvOpts = o
+	return []primitives.Received{{Snapshot: target + "@got"}}, s.rec("Receive", target)
+}
+func (s *stub) ResumeToken(ds string) (string, bool, error) {
+	return s.token, s.token != "", s.rec("ResumeToken", ds)
+}
+func (s *stub) AbortResume(ds string) error { return s.rec("AbortResume", ds) }

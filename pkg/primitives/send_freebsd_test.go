@@ -463,7 +463,7 @@ func TestReceiveOptionsOnARealKernel(t *testing.T) {
 	exec.Command("zfs", "mount", dst).Run() // changing the mountpoint remounts
 	mp := zget(t, dst, "mountpoint")["mountpoint"]
 	os.WriteFile(filepath.Join(mp, "intruder"), []byte("modified"), 0o644)
-	if _, err := c.Receive(context.Background(), bytes.NewReader(incr), dst, nil); !errors.Is(err, syscall.ENODEV) {
+	if _, err := c.Receive(context.Background(), bytes.NewReader(incr), dst, nil); !errors.Is(err, syscall.ETXTBSY) {
 		t.Errorf("incremental into a modified target without Force: %v", err)
 	}
 	if _, err := c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{Force: true}); err != nil {
