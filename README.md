@@ -157,7 +157,9 @@ sent): a resumed, saved or redacted replication stream (`Replicate`/`Intermediat
 `Holds` with `ResumeSend`, `Saved` or `RedactedWith`), and a raw redacted stream. A
 replication stream that was cut off is finished the way the CLI does it: receive with
 `Resumable()`, resume the stream each leftover token names (`ResumeSend`), then send the
-whole `-R` again; what exists is skipped.
+rest as an incremental `-R` (`From`, `Intermediates`) from the newest snapshot every dataset
+has; a dataset that did not arrive yet comes in full. (`zfs receive` takes no full stream
+onto a dataset that has snapshots, even with `-F`, and neither does `Receive`.)
 
 `Heal` is passed to the kernel but is not tested against a corrupted pool.
 

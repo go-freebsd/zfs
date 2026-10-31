@@ -1016,7 +1016,7 @@ func tokensBelow(t *testing.T, root string) map[string]string {
 
 // zfs refuses to resume or to redact a replication stream, so the way to
 // finish an interrupted -R is: resume the one stream the token names, then
-// send the whole -R again. The library does the same as the CLI at each step.
+// send the rest as an incremental -R. The library does the same as the CLI at each step.
 func TestReplicationResumesLikeZfs(t *testing.T) {
 	c, pool := testClient(t)
 	src := bigTree(t, pool, "pr_src")
@@ -1090,16 +1090,21 @@ func TestReplicationResumesLikeZfs(t *testing.T) {
 		t.Errorf("tokens left after the resume: %v / %v", a, b)
 	}
 
-	// Then the whole -R again: what exists is skipped, the rest arrives.
+	// zfs receive will not take a full stream onto a dataset that has
+	// snapshots, even with -F; the rest is sent as the CLI's users do, as an
+	// incremental -R from the newest snapshot every dataset has. A dataset
+	// that did not arrive yet comes in full.
+	rest := theirs(t, "-R", "-I", "@a", src+"@b")
 	zfsRecv := exec.Command("zfs", "receive", "-s", "-u", "-F", ref)
-	zfsRecv.Stdin = bytes.NewReader(full)
+	zfsRecv.Stdin = bytes.NewReader(rest)
 	if out, err := zfsRecv.CombinedOutput(); err != nil {
-		t.Fatalf("zfs receive of the whole stream: %v\n%s", err, out)
+		t.Fatalf("zfs receive of the rest: %v\n%s", err, out)
 	}
-	if _, err := c.Receive(context.Background(), bytes.NewReader(full), mine, &ReceiveOptions{NoMount: true, Resumable: true, Force: true}); err != nil {
-		t.Fatalf("Receive of the whole stream: %v", err)
+	restOurs := ours(t, c, src+"@b", &SendOptions{Replicate: true, Intermediates: true, From: "@a"})
+	if _, err := c.Receive(context.Background(), bytes.NewReader(restOurs), mine, &ReceiveOptions{NoMount: true, Resumable: true, Force: true}); err != nil {
+		t.Fatalf("Receive of the rest: %v", err)
 	}
-	sameTrees(t, "after resume and resend", ref, mine)
+	sameTrees(t, "after resume and the rest", ref, mine)
 	for _, d := range []string{ref, mine} {
 		if got, want := namesBelow(t, d), namesBelow(t, src); got != want {
 			t.Errorf("%s does not equal the source\n%s\nsource:\n%s", d, got, want)
