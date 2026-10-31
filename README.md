@@ -178,6 +178,16 @@ is the length of the stream. It does not verify data checksums (libzfs does not 
 does not predict failures only the kernel knows, such as a full pool or a target that was
 modified since the base (`ETXTBSY`).
 
+## Diff
+
+`Snapshot.Diff(ctx, other)` and `Snapshot.DiffNow(ctx)` are `zfs diff`: an `iter.Seq2` of
+`DiffEntry` (added, removed, modified, renamed, with the file type of `-F`, the change time
+of `-t` and the link count change shown as `(+1)`). The kernel reports which objects changed;
+the paths and stats come from `OBJ_TO_STATS` as in libzfs, and `DiffNow` makes the temporary
+snapshot `zfs diff` makes. Entries are in object order, paths start at the root of the dataset
+and are not escaped. The CI compares line by line with `zfs diff -Ft -H` for snapshots, the
+live filesystem and a clone.
+
 ## Mounting
 
 The kernel only creates datasets; mounting is userland work in libzfs, and is done here
@@ -238,6 +248,7 @@ covered yet.
 | `GET_HOLDS`, `HOLD`, `RELEASE` | `Holds`, `Hold`, `Release` |
 | `GET_BOOKMARKS`, `BOOKMARK`, `DESTROY_BOOKMARKS` | `Bookmarks`, `CreateBookmark`, `DestroyBookmarks` |
 | `SPACE_WRITTEN`, `SPACE_SNAPS` | `SpaceWritten`, `SnapshotRangeSpace` |
+| `DIFF`, `OBJ_TO_STATS`, `NEXT_OBJ`, `TMP_SNAPSHOT` | `Diff` (`zfs diff`) |
 | `POOL_CONFIGS` | `Pools` |
 | `SET_PROP`, `INHERIT_PROP` | `SetProps`, `SetProp`, `InheritProp` |
 | `CREATE`, `CLONE` | `Create`, `CreateVolume`, `Clone` |

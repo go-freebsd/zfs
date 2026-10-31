@@ -180,6 +180,20 @@ var (
 // stream is before it is received.
 func ReadStreamHeader(r io.Reader) (*StreamHeader, error) { return primitives.ReadStreamHeader(r) }
 
+// DiffEntry is one line of zfs diff; DiffChange is its first column.
+type (
+	DiffEntry  = primitives.DiffEntry
+	DiffChange = primitives.DiffChange
+)
+
+// The kinds of change a DiffEntry reports.
+const (
+	DiffAdded    = primitives.DiffAdded
+	DiffRemoved  = primitives.DiffRemoved
+	DiffModified = primitives.DiffModified
+	DiffRenamed  = primitives.DiffRenamed
+)
+
 // StreamSize is the estimate for one stream of a send.
 type StreamSize = primitives.StreamSize
 

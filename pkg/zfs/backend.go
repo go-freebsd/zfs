@@ -3,6 +3,7 @@ package zfs
 import (
 	"context"
 	"io"
+	"iter"
 
 	"github.com/go-freebsd/zfs/pkg/primitives"
 )
@@ -36,6 +37,7 @@ type backend interface {
 
 	Send(ctx context.Context, snapshot string, w io.Writer, o *primitives.SendOptions) error
 	SendSize(snapshot string, o *primitives.SendOptions) (uint64, error)
+	Diff(ctx context.Context, from, to string) iter.Seq2[primitives.DiffEntry, error]
 	SendSizes(snapshot string, o *primitives.SendOptions) ([]primitives.StreamSize, error)
 	ResumeSend(ctx context.Context, w io.Writer, token string, o *primitives.SendOptions) error
 	Redact(snapshot, bookmark string, redactionSnapshots []string) error

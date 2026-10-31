@@ -20,6 +20,10 @@ type fakeKernel struct {
 	pools             []string
 	readOnlyPools     map[string]bool // pools imported read-only
 	poolPropCalls     []string
+	objs              map[string]map[uint64]fakeObj // zfs diff: snapshot -> object -> description
+	diffRecords       []diffRec
+	diffArgs          [][2]string // from, to of each ZFS_IOC_DIFF
+	tmpSnaps          []string
 	recvdProps        map[string]map[string]any // name -> properties the dataset was received with
 	bareBookmarkProps bool                      // answer GET_BOOKMARKS with bare values instead of {value} lists
 
@@ -463,6 +467,9 @@ func (k *fakeKernel) Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error {
 	}
 	if isWriteIOC(ioc) {
 		_, err := k.write(ioc, cmd, nil)
+		return err
+	}
+	if handled, err := k.diffIoctl(ioc, cmd); handled {
 		return err
 	}
 	if _, ok := k.ds[cmd.GetName()]; !ok {

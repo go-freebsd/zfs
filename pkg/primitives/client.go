@@ -12,6 +12,7 @@ type caller interface {
 	Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.List, error)
 	Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error
 	CallOnce(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.List, error)
+	DoOnce(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List, dstSize int) (*nvlist.List, error)
 }
 
 // Client reads ZFS state. It is safe for concurrent use.

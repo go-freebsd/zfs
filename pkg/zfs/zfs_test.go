@@ -691,3 +691,20 @@ func TestReadOnlyPoolClassifies(t *testing.T) {
 		t.Errorf("receive: %v", err)
 	}
 }
+
+func TestSnapshotDiffPassesTheNamesAndTheEntries(t *testing.T) {
+	c, s := newStub()
+	a, b := c.Snapshot("tank/a@s1"), c.Snapshot("tank/a@s2")
+	n := 0
+	for e, err := range a.Diff(context.Background(), b) {
+		if err != nil || e.Change != DiffAdded || e.Path != "/x" {
+			t.Fatalf("%+v %v", e, err)
+		}
+		n++
+	}
+	for range a.DiffNow(context.Background()) {
+	}
+	if n != 1 || s.calls[len(s.calls)-2] != "Diff tank/a@s1 tank/a@s2" || s.last() != "Diff tank/a@s1 " {
+		t.Errorf("calls %v", s.calls)
+	}
+}

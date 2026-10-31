@@ -1,0 +1,142 @@
+package primitives
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"testing"
+)
+
+// diffLine formats an entry the way zfs diff -Ft -H prints it.
+func diffLine(e DiffEntry, mnt string) string {
+	ts := fmt.Sprintf("%10d.%09d", e.Ctime.Unix(), e.Ctime.Nanosecond())
+	head := fmt.Sprintf("%s\t%c\t%c\t%s", ts, e.Change, e.Type, mnt+e.Path)
+	switch {
+	case e.Change == DiffRenamed:
+		return head + "\t" + mnt + e.NewPath
+	case e.LinkDelta != 0:
+		return head + fmt.Sprintf("\t(%+d)", e.LinkDelta)
+	}
+	return head
+}
+
+func mineDiff(t *testing.T, c *Client, from, to, mnt string) []string {
+	t.Helper()
+	var out []string
+	for e, err := range c.Diff(context.Background(), from, to) {
+		if err != nil {
+			t.Fatalf("Diff(%s, %s): %v", from, to, err)
+		}
+		out = append(out, diffLine(e, mnt))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func theirDiff(t *testing.T, args ...string) []string {
+	t.Helper()
+	out := lines(cli(t, "zfs", append([]string{"diff", "-F", "-t", "-H"}, args...)...))
+	sort.Strings(out)
+	return out
+}
+
+func sameDiff(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(want) < 3 {
+		t.Fatalf("%s: zfs diff reports only %d changes: the comparison would prove nothing", label, len(want))
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("%s: differs\nzfs diff:\n%s\nhere:\n%s", label, strings.Join(want, "\n"), strings.Join(got, "\n"))
+	}
+}
+
+// What zfs diff reports for creation, modification, deletion, renames, hard
+// links, symbolic links, type changes and re-created names, in the very
+// words of the CLI, between two snapshots, against the live filesystem and
+// against the snapshot of a clone.
+func TestDiffLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src, dir := source(t, c, pool, "df_src", nil, map[string]string{
+		"keep": "same", "mod": "before", "del": "bye", "ren": "r", "victim": "v", "winner": "w",
+		"hl": "h", "mode": "m", "type": "t", "redo": "old",
+	})
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := func(n string) string { return filepath.Join(dir, n) }
+	must(os.Mkdir(p("dir"), 0o755))
+	must(os.WriteFile(p("dir/inner"), []byte("i"), 0o644))
+	must(os.Mkdir(p("mv"), 0o755))
+	must(os.Mkdir(p("gone"), 0o755))
+	must(os.Symlink("keep", p("sym")))
+	snap(t, c, src+"@a")
+
+	must(os.WriteFile(p("mod"), []byte("after, and longer"), 0o644))
+	must(os.Remove(p("del")))
+	must(os.Rename(p("ren"), p("ren2")))
+	must(os.Rename(p("winner"), p("victim"))) // rename over an existing name
+	must(os.Link(p("hl"), p("hl_new")))       // a hard link appears
+	must(os.Chmod(p("mode"), 0o600))          // metadata only
+	must(os.Rename(p("mv"), p("dir/mv")))     // a directory moves
+	must(os.Rename(p("dir"), p("dir2")))      // and a directory with content is renamed
+	must(os.Remove(p("type")))                // a file becomes a directory
+	must(os.Mkdir(p("type"), 0o755))
+	must(os.Remove(p("redo"))) // removed and created again
+	must(os.WriteFile(p("redo"), []byte("new"), 0o644))
+	must(os.Remove(p("sym")))
+	must(os.Symlink("mod", p("sym")))
+	must(os.WriteFile(p("new"), []byte("n"), 0o644))
+	must(syscall.Mkfifo(p("fifo"), 0o644))
+	must(os.Remove(p("gone")))
+	snap(t, c, src+"@b")
+
+	mnt := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", src)
+	sameDiff(t, "snapshot to snapshot", mineDiff(t, c, src+"@a", src+"@b", mnt), theirDiff(t, src+"@a", src+"@b"))
+	sameDiff(t, "@name shorthand", mineDiff(t, c, src+"@a", "@b", mnt), theirDiff(t, src+"@a", "@b"))
+
+	// The live filesystem: more changes after @b.
+	must(os.WriteFile(p("late"), []byte("l"), 0o644))
+	must(os.Remove(p("keep")))
+	sameDiff(t, "against the live filesystem", mineDiff(t, c, src+"@b", "", mnt), theirDiff(t, src+"@b"))
+	if tmp := cli(t, "zfs", "list", "-H", "-t", "snapshot", "-o", "name", "-r", src); strings.Contains(tmp, "zfs-diff") {
+		t.Errorf("the temporary snapshot is still there:\n%s", tmp)
+	}
+
+	// A clone of @a, changed and snapshotted: diff of @a against it.
+	clone := wds(t, pool, "df_clone")
+	cdir := tdir(t)
+	must(c.Clone(clone, src+"@a", &CreateOptions{Props: map[string]any{"mountpoint": cdir}}))
+	ensureMounted(t, clone)
+	must(os.WriteFile(filepath.Join(cdir, "only_in_clone"), []byte("c"), 0o644))
+	must(os.Remove(filepath.Join(cdir, "del")))
+	snap(t, c, clone+"@c")
+	cmnt := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", clone)
+	want := theirDiff(t, src+"@a", clone+"@c")
+	// The CLI names the paths below the mountpoint of the dataset of from.
+	for i := range want {
+		want[i] = strings.ReplaceAll(want[i], mnt, cmnt)
+	}
+	got := mineDiff(t, c, src+"@a", clone+"@c", mnt)
+	for i := range got {
+		got[i] = strings.ReplaceAll(got[i], mnt, cmnt)
+	}
+	sameDiff(t, "against a clone", got, want)
+
+	// An unrelated or earlier snapshot is refused by the kernel.
+	for _, bad := range [][2]string{{src + "@b", src + "@a"}} {
+		var err error
+		for _, e := range c.Diff(context.Background(), bad[0], bad[1]) {
+			err = e
+		}
+		if err == nil {
+			t.Errorf("diff %s -> %s: want an error", bad[0], bad[1])
+		}
+	}
+}

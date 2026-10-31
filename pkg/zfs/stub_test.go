@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"iter"
 	"sort"
 
 	"github.com/go-freebsd/zfs/pkg/primitives"
@@ -154,6 +155,13 @@ func (s *stub) Send(ctx context.Context, snapshot string, w io.Writer, o *primit
 	s.sendOpts, s.writer = o, w
 	return s.rec("Send", snapshot)
 }
+func (s *stub) Diff(ctx context.Context, from, to string) iter.Seq2[primitives.DiffEntry, error] {
+	s.rec("Diff", from+" "+to)
+	return func(yield func(primitives.DiffEntry, error) bool) {
+		yield(primitives.DiffEntry{Change: primitives.DiffAdded, Type: 'F', Path: "/x"}, nil)
+	}
+}
+
 func (s *stub) SendSizes(snapshot string, o *primitives.SendOptions) ([]primitives.StreamSize, error) {
 	return []primitives.StreamSize{{To: snapshot, Bytes: 4242}}, s.rec("SendSizes", snapshot)
 }

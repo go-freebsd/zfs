@@ -1,6 +1,8 @@
 package zfs
 
 import (
+	"context"
+	"iter"
 	"strings"
 
 	"github.com/go-freebsd/zfs/pkg/primitives"
@@ -148,3 +150,30 @@ func (b *Bookmark) Info() (*Info, error) {
 
 // Destroy destroys the bookmark.
 func (b *Bookmark) Destroy() error { return wrap("destroy", b.name, b.c.b.Destroy(b.name, nil)) }
+
+// Diff lists what changed between s and the later snapshot other of the same
+// dataset, or of a clone of it (zfs diff). Entries come in the order of the
+// objects, not of the names; paths start at the root of the dataset and are
+// not escaped. Breaking out of the loop or cancelling ctx ends the diff.
+func (s *Snapshot) Diff(ctx context.Context, other *Snapshot) iter.Seq2[DiffEntry, error] {
+	return s.diff(ctx, other.name)
+}
+
+// DiffNow lists what changed between s and the live filesystem (zfs diff
+// with one snapshot). A temporary snapshot is made for it and removed again.
+func (s *Snapshot) DiffNow(ctx context.Context) iter.Seq2[DiffEntry, error] {
+	return s.diff(ctx, "")
+}
+
+func (s *Snapshot) diff(ctx context.Context, to string) iter.Seq2[DiffEntry, error] {
+	return func(yield func(DiffEntry, error) bool) {
+		for e, err := range s.c.b.Diff(ctx, s.name, to) {
+			if err != nil {
+				err = wrap("diff", s.name, err)
+			}
+			if !yield(e, err) {
+				return
+			}
+		}
+	}
+}
