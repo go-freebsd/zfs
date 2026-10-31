@@ -483,7 +483,7 @@ func TestSendReplicationSizeMatchesZfs(t *testing.T) {
 func plainTree(t *testing.T, pool, name string) string {
 	t.Helper()
 	src := wds(t, pool, name)
-	cli(t, "zfs", "create", src)
+	cli(t, "zfs", "create", "-o", "mountpoint="+tdir(t), src)
 	cli(t, "zfs", "create", src+"/kid")
 	for _, d := range []string{src, src + "/kid"} {
 		mp := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", d)
@@ -532,7 +532,8 @@ func TestReplicationBetweenZfsProcessesAndThisLibrary(t *testing.T) {
 			if wrap == "reader" {
 				in = io.MultiReader(out) // not an *os.File: copied through a pipe
 			}
-			got, rerr := c.Receive(context.Background(), in, mine, nil)
+			refDir, mineDir := tdir(t), tdir(t)
+			got, rerr := c.Receive(context.Background(), in, mine, &ReceiveOptions{Props: map[string]any{"mountpoint": mineDir}})
 			if err := send.Wait(); err != nil {
 				t.Fatalf("%s: zfs send: %v\n%s", wrap, err, stderr.String())
 			}
@@ -540,10 +541,21 @@ func TestReplicationBetweenZfsProcessesAndThisLibrary(t *testing.T) {
 				t.Fatalf("%s: Receive: %d streams, %v", wrap, len(got), rerr)
 			}
 			// The CLI does the same with the same stream.
-			zreceive(t, theirs(t, "-R", src+"@b"), ref)
-			sameTrees(t, wrap, ref, mine)
+			zreceive(t, theirs(t, "-R", src+"@b"), "-o", "mountpoint="+refDir, ref)
+			noMountpoints := func(root string) string {
+				var keep []string
+				for _, l := range treeState(t, root) {
+					if !strings.Contains(l, "\tmountpoint\t") {
+						keep = append(keep, l)
+					}
+				}
+				return strings.Join(keep, "\n")
+			}
+			if a, b := noMountpoints(ref), noMountpoints(mine); a != b {
+				t.Errorf("%s: trees differ\nzfs receive:\n%s\nhere:\n%s", wrap, a, b)
+			}
 			// Mounted like zfs receive mounts, with the data in place.
-			if a, b := mountedBelow(t, ref), mountedBelow(t, mine); strings.Join(a, "\n") != strings.Join(b, "\n") || len(b) != 2 {
+			if a, b := mountedBelow(t, ref), mountedBelow(t, mine); strings.ReplaceAll(strings.Join(a, "\n"), refDir, "DIR") != strings.ReplaceAll(strings.Join(b, "\n"), mineDir, "DIR") || len(b) != 2 {
 				t.Errorf("%s: mounted\nzfs receive: %q\nhere:        %q", wrap, a, b)
 			}
 			for _, d := range []string{"", "/kid"} {
@@ -561,7 +573,7 @@ func TestReplicationBetweenZfsProcessesAndThisLibrary(t *testing.T) {
 	t.Run("Send to zfs receive", func(t *testing.T) {
 		for _, wrap := range []string{"file", "writer"} {
 			dst := wds(t, pool, "px_dst")
-			recv := exec.Command("zfs", "receive", dst)
+			recv := exec.Command("zfs", "receive", "-u", dst)
 			var stderr bytes.Buffer
 			recv.Stderr = &stderr
 			var w io.Writer
