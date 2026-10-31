@@ -194,6 +194,9 @@ const (
 	DiffRenamed  = primitives.DiffRenamed
 )
 
+// DestroyPlan is what destroying snapshots by specification would do.
+type DestroyPlan = primitives.DestroyPlan
+
 // StreamSize is the estimate for one stream of a send.
 type StreamSize = primitives.StreamSize
 

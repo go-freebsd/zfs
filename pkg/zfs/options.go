@@ -23,6 +23,7 @@ const (
 	scReceive
 	scMount
 	scUnmount
+	scDestroyRange
 
 	scProps = scCreate | scSet | scClone | scReceive // a regular property
 	scUser  = scProps | scSnapshot | scSnapshotAll
@@ -197,13 +198,13 @@ func ForceUnmount() Option {
 
 // Recursive destroys the descendants and snapshots of a dataset too.
 func Recursive() Option {
-	return Option{name: "Recursive", scope: scDestroyDataset, apply: func(c *config) { c.recursive = true }}
+	return Option{name: "Recursive", scope: scDestroyDataset | scDestroyRange, apply: func(c *config) { c.recursive = true }}
 }
 
 // Deferred marks a snapshot that is held or cloned for destruction once
 // the last hold or clone is gone.
 func Deferred() Option {
-	return Option{name: "Deferred", scope: scDestroySnapshot, apply: func(c *config) { c.deferred = true }}
+	return Option{name: "Deferred", scope: scDestroySnapshot | scDestroyRange, apply: func(c *config) { c.deferred = true }}
 }
 
 // Listing options.

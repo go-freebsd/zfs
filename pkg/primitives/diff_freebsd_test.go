@@ -2,10 +2,13 @@ package primitives
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -137,6 +140,117 @@ func TestDiffLikeZfs(t *testing.T) {
 		}
 		if err == nil {
 			t.Errorf("diff %s -> %s: want an error", bad[0], bad[1])
+		}
+	}
+}
+
+// snapTree makes pool/<name> with a child, five snapshots s1..s5 of both
+// (data written in between, so that destroying frees something), a clone of
+// the parent's s2 and a hold on the child's s4.
+func snapTree(t *testing.T, c *Client, pool, name string) string {
+	t.Helper()
+	src, dir := source(t, c, pool, name, nil, nil)
+	cli(t, "zfs", "create", "-o", "mountpoint="+tdir(t), src+"/kid")
+	kid := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", src+"/kid")
+	for i := 1; i <= 5; i++ {
+		data := make([]byte, 128<<10)
+		rand.Read(data)
+		for _, d := range []string{dir, kid} {
+			if err := os.WriteFile(filepath.Join(d, fmt.Sprintf("f%d", i)), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cli(t, "zfs", "snapshot", "-r", fmt.Sprintf("%s@s%d", src, i))
+	}
+	cli(t, "zfs", "clone", "-o", "mountpoint=none", src+"@s2", wds(t, pool, name+"_clone"))
+	cli(t, "zfs", "hold", "keep", src+"/kid@s4")
+	t.Cleanup(func() { releaseAll(src) })
+	return src
+}
+
+func snapsBelow(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("zfs", "list", "-H", "-r", "-t", "snapshot", "-o", "name", "-s", "createtxg", root).Output()
+	if err != nil {
+		return "(none)"
+	}
+	return strings.ReplaceAll(string(out), root, "ROOT")
+}
+
+// zfs destroy dataset@spec and DestroySnapshotSpec destroy the same
+// snapshots for every form of the specification, with and without -r and -d,
+// refuse the same ones, and the dry run names the same snapshots and the
+// same space as zfs destroy -nvp.
+func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	type tc struct {
+		spec      string
+		recursive bool
+		deferred  bool
+	}
+	cases := []tc{
+		{"s5", false, false}, {"s3%s5", false, false}, {"%s1", false, false}, {"s5%", false, false},
+		{"s3,s5", false, false}, {"s1%s1,s5", false, false}, {"s9", false, false}, {"s4%s9", false, false},
+		{"s3%s4", true, false}, {"s4", true, false}, {"%", true, true}, {"s2", false, false}, {"s2", false, true},
+		{"%s3", true, false}, {"%s3", true, true}, {"s4%s2", false, false},
+	}
+	for i, k := range cases {
+		label := fmt.Sprintf("%s r=%v d=%v", k.spec, k.recursive, k.deferred)
+		ref := snapTree(t, c, pool, fmt.Sprintf("sd_ref%d", i))
+		mine := snapTree(t, c, pool, fmt.Sprintf("sd_mine%d", i))
+
+		args := []string{"destroy"}
+		if k.recursive {
+			args = append(args, "-r")
+		}
+		if k.deferred {
+			args = append(args, "-d")
+		}
+		// The dry run first.
+		dry := exec.Command("zfs", append(append([]string{}, args...), "-n", "-p", ref+"@"+k.spec)...)
+		dryOut, dryErr := dry.CombinedOutput()
+		plan, planErr := c.PlanDestroySnapshots(mine, k.spec, k.recursive, k.deferred)
+		if (dryErr == nil) != (planErr == nil) {
+			t.Errorf("%s: zfs destroy -np: %v %q; plan: %v", label, dryErr, dryOut, planErr)
+		}
+		if dryErr == nil && planErr == nil {
+			var want []string
+			var reclaim uint64
+			for _, l := range lines(string(dryOut)) {
+				f := strings.Fields(l)
+				switch {
+				case len(f) == 2 && f[0] == "destroy":
+					want = append(want, strings.ReplaceAll(f[1], ref, "ROOT"))
+				case len(f) == 2 && f[0] == "reclaim":
+					reclaim, _ = strconv.ParseUint(f[1], 10, 64)
+				}
+			}
+			var got []string
+			for _, s := range plan.Snapshots {
+				got = append(got, strings.ReplaceAll(s, mine, "ROOT"))
+			}
+			sort.Strings(want)
+			sort.Strings(got)
+			if strings.Join(want, ",") != strings.Join(got, ",") || len(want) == 0 {
+				t.Errorf("%s: plan\nzfs: %v\nhere: %v", label, want, got)
+			}
+			if reclaim != plan.Reclaim {
+				t.Errorf("%s: reclaim %d here, zfs says %d", label, plan.Reclaim, reclaim)
+			}
+		}
+
+		refErr := exec.Command("zfs", append(append([]string{}, args...), ref+"@"+k.spec)...).Run()
+		_, mineErr := c.DestroySnapshotSpec(mine, k.spec, k.recursive, k.deferred)
+		if (refErr == nil) != (mineErr == nil) {
+			t.Errorf("%s: zfs destroy: %v; here: %v", label, refErr, mineErr)
+		}
+		if a, b := snapsBelow(t, ref), snapsBelow(t, mine); a != b {
+			t.Errorf("%s: what is left differs\nzfs destroy:\n%s\nhere:\n%s", label, a, b)
+		}
+		t.Logf("%s: zfs destroy %v, here %v", label, refErr, mineErr)
+		for _, r := range []string{ref, mine} {
+			releaseAll(r)
+			exec.Command("zfs", "destroy", "-rR", r).Run()
 		}
 	}
 }

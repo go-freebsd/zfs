@@ -162,6 +162,14 @@ func (s *stub) Diff(ctx context.Context, from, to string) iter.Seq2[primitives.D
 	}
 }
 
+func (s *stub) PlanDestroySnapshots(dataset, spec string, recursive, deferred bool) (*primitives.DestroyPlan, error) {
+	return &primitives.DestroyPlan{Snapshots: []string{dataset + "@x"}, Reclaim: 5}, s.rec("PlanDestroySnapshots", dataset, "@", spec, fmt.Sprint(recursive, deferred))
+}
+
+func (s *stub) DestroySnapshotSpec(dataset, spec string, recursive, deferred bool) ([]string, error) {
+	return []string{dataset + "@x"}, s.rec("DestroySnapshotSpec", dataset, "@", spec, fmt.Sprint(recursive, deferred))
+}
+
 func (s *stub) SendSizes(snapshot string, o *primitives.SendOptions) ([]primitives.StreamSize, error) {
 	return []primitives.StreamSize{{To: snapshot, Bytes: 4242}}, s.rec("SendSizes", snapshot)
 }

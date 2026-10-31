@@ -708,3 +708,20 @@ func TestSnapshotDiffPassesTheNamesAndTheEntries(t *testing.T) {
 		t.Errorf("calls %v", s.calls)
 	}
 }
+
+func TestDatasetDestroySnapshotsPassesTheSpecAndTheFlags(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/a")
+	names, err := d.DestroySnapshots("a%c", Recursive(), Deferred())
+	if err != nil || len(names) != 1 || s.last() != "DestroySnapshotSpec tank/a@a%ctrue true" {
+		t.Fatalf("%v %v %q", names, err, s.last())
+	}
+	if _, err := d.PlanDestroySnapshots("%"); err != nil || s.last() != "PlanDestroySnapshots tank/a@%false false" {
+		t.Errorf("%v %q", err, s.last())
+	}
+	// Options of other operations are refused before anything is sent.
+	n := len(s.calls)
+	if _, err := d.DestroySnapshots("a", ForceUnmount()); !errors.Is(err, ErrInvalidOption) || len(s.calls) != n {
+		t.Errorf("ForceUnmount: %v", err)
+	}
+}

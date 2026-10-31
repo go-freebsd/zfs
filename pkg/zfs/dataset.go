@@ -291,3 +291,30 @@ func (d *Dataset) ChangeKey(key *Key) error {
 func (d *Dataset) InheritKey() error {
 	return wrapKey("inherit key", d.name, d.c.b.InheritKey(d.name))
 }
+
+// DestroySnapshots destroys snapshots of d by specification, all or none, and
+// returns their names (zfs destroy d@spec). spec is a snapshot name, a range
+// "a%c" (both ends included), "%c" (up to c), "a%" (from a on), "%" (all), or a
+// comma separated list of those, ordered by creation. Recursive() applies it to
+// the descendants too; Deferred() marks snapshots that are held or cloned.
+// Names that do not exist are skipped; if none is left the error is ErrNotFound.
+// A snapshot with clones is ErrBusy unless Deferred().
+func (d *Dataset) DestroySnapshots(spec string, opts ...Option) ([]string, error) {
+	cfg, err := collect("destroy snapshots", scDestroyRange, opts)
+	if err != nil {
+		return nil, wrap("destroy snapshots", d.name, err)
+	}
+	names, err := d.c.b.DestroySnapshotSpec(d.name, spec, cfg.recursive, cfg.deferred)
+	return names, wrap("destroy snapshots", d.name+"@"+spec, err)
+}
+
+// PlanDestroySnapshots reports what DestroySnapshots would destroy and how
+// much space that frees, without destroying anything (zfs destroy -nv).
+func (d *Dataset) PlanDestroySnapshots(spec string, opts ...Option) (*DestroyPlan, error) {
+	cfg, err := collect("destroy snapshots", scDestroyRange, opts)
+	if err != nil {
+		return nil, wrap("destroy snapshots", d.name, err)
+	}
+	p, err := d.c.b.PlanDestroySnapshots(d.name, spec, cfg.recursive, cfg.deferred)
+	return p, wrap("destroy snapshots", d.name+"@"+spec, err)
+}

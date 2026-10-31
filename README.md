@@ -181,6 +181,15 @@ is the length of the stream. It does not verify data checksums (libzfs does not 
 does not predict failures only the kernel knows, such as a full pool or a target that was
 modified since the base (`ETXTBSY`).
 
+## Destroying snapshots by specification
+
+`Dataset.DestroySnapshots("a%c", zfs.Recursive(), zfs.Deferred())` is `zfs destroy [-rd]
+fs@a%c`: a name, a range (`a%c`, `%c`, `a%`, `%`) or a comma separated list, ordered by
+creation, all or none. `PlanDestroySnapshots` is the dry run (`zfs destroy -nvp`): the
+snapshots and the space they free. As in the CLI, names that do not exist are skipped and an
+empty result is `ErrNotFound`; a snapshot with clones is `ErrBusy` unless `Deferred()`. Not
+done: `-R` (destroying the clones too).
+
 ## Diff
 
 `Snapshot.Diff(ctx, other)` and `Snapshot.DiffNow(ctx)` are `zfs diff`: an `iter.Seq2` of
@@ -255,7 +264,7 @@ covered yet.
 | `POOL_CONFIGS` | `Pools` |
 | `SET_PROP`, `INHERIT_PROP` | `SetProps`, `SetProp`, `InheritProp` |
 | `CREATE`, `CLONE` | `Create`, `CreateVolume`, `Clone` |
-| `SNAPSHOT`, `DESTROY_SNAPS`, `DESTROY` | `Snapshot`, `DestroySnapshots`, `Destroy` |
+| `SNAPSHOT`, `DESTROY_SNAPS`, `DESTROY` | `Snapshot`, `DestroySnapshots`, `DestroySnapshotSpec`, `PlanDestroySnapshots`, `Destroy` |
 | `RENAME`, `ROLLBACK`, `PROMOTE` | `Rename`, `Rollback`, `Promote` |
 | `SEND_NEW`, `SEND_SPACE`, `SEND_PROGRESS`, `RECV_NEW`, `REDACT` | `Send`, `SendFD`, `SendSize`, `SendProgress`, `Receive`, `ReceiveFD`, `Redact` |
 | `LOAD_KEY`, `UNLOAD_KEY`, `CHANGE_KEY` | `LoadKey`, `CheckKey`, `UnloadKey`, `ChangeKey`, `InheritKey` |
