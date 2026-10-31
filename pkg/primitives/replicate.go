@@ -583,7 +583,8 @@ func (c *Client) sendPackage(ctx context.Context, snapshot string, w io.Writer, 
 }
 
 // sendPackageSize estimates a replication stream as zfs send -n does: the
-// sum of the estimates of its streams, without the header.
+// sum of the estimates of its streams, without the header. The estimate is
+// high for a clone, whose first stream is counted as a full one.
 func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error) {
 	r, err := c.newReplSend(snapshot, o)
 	if err != nil {
@@ -600,6 +601,11 @@ func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error
 	for _, s := range steps {
 		step := *o
 		step.From, step.Intermediates, step.Replicate, step.Props, step.Holds = s.from, false, false, false, false
+		if datasetOf(s.from) != datasetOf(s.to) {
+			// The first stream of a clone goes out incremental from its origin,
+			// but zfs send -n estimates it as a full stream, and so do we.
+			step.From = ""
+		}
 		n, err := c.SendSize(s.to, &step)
 		if err != nil {
 			return 0, fmt.Errorf("zfs: send size %s: %w", s.to, err)
