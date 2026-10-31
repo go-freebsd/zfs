@@ -50,9 +50,10 @@ func (c *Client) receivePackage(ctx context.Context, src *os.File, h *StreamHead
 	}
 
 	var (
-		got  []Received
-		top  string
-		last = prev
+		got     []Received
+		top     string
+		last    = prev
+		virtual = map[string]bool{}
 	)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -77,16 +78,21 @@ func (c *Client) receivePackage(ctx context.Context, src *os.File, h *StreamHead
 		}
 		var rec Received
 		if o.DryRun {
-			rec, err = c.receiveDry(sh, last, src, name, o)
+			dry := *o
+			dry.virtual = virtual
+			rec, err = c.receiveDry(sh, last, src, name, &dry)
 			last = sh
 			got = append(got, rec)
 			if err != nil {
 				return got, ctxOr(ctx, err)
 			}
+			ds, _, _ := strings.Cut(name, "@")
+			virtual[ds] = true
 			continue
 		}
 		fs, snapName, found := p.find(sh.ToGUID)
-		sub := &substream{noMount: true}
+		ds, _, _ := strings.Cut(name, "@")
+		sub := &substream{noMount: true, child: top != "" && ds != top}
 		if found {
 			if props, ok := fs.List("props"); ok {
 				sub.props = withoutKeylocation(props)

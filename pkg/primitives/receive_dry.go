@@ -104,6 +104,9 @@ func (c *Client) dryRunChecks(h *StreamHeader, snapshot string, o *ReceiveOption
 		if err != nil {
 			return err
 		}
+		if !ok && o.virtual[parent] {
+			return nil // an earlier stream of this replication stream makes it
+		}
 		if !ok {
 			if !o.Parents {
 				return no(syscall.ENOENT)

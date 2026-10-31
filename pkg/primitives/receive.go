@@ -80,6 +80,10 @@ type ReceiveOptions struct {
 	// SkipHolds (-k) does not put back the holds a replication stream
 	// carries.
 	SkipHolds bool
+
+	// virtual lists datasets that earlier streams of a dry run would have
+	// made.
+	virtual map[string]bool
 }
 
 // Received is the outcome of receiving one stream.
@@ -167,6 +171,10 @@ type substream struct {
 	// noMount leaves mounting to the caller, which mounts the whole tree
 	// when it is done.
 	noMount bool
+	// child is set for every dataset of the tree but the first: the
+	// properties given with Props apply to the top only, and the others
+	// inherit them (libzfs: "override props on child dataset are inherited").
+	child bool
 }
 
 func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveOptions, sub *substream) (Received, error) {
@@ -225,6 +233,10 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		v, err := convertProp(k, o.Props[k], false)
 		if err != nil {
 			return rec, err
+		}
+		if sub != nil && sub.child {
+			lp.Add(k, nvlist.Flag{})
+			continue
 		}
 		lp.Add(k, v)
 	}
