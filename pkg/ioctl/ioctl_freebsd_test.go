@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/go-freebsd/nvlist/pkg/nvlist"
@@ -156,5 +157,21 @@ func TestIoctlNumbersKnownAnswers(t *testing.T) {
 	// SEND_SPACE of a missing snapshot is ENOENT.
 	if _, err := c.Call(IOCSendSpace, pool+"@gojail_missing", nvlist.New()); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("SEND_SPACE on a missing snapshot: %v, want ENOENT", err)
+	}
+}
+
+func TestNoPreemptBlocksSIGURGOnlyForTheCall(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if threadSignalBlocked() {
+		t.Skip("SIGURG is blocked to begin with")
+	}
+	done := noPreempt()
+	if !threadSignalBlocked() {
+		t.Error("SIGURG is not blocked during the call")
+	}
+	done()
+	if threadSignalBlocked() {
+		t.Error("SIGURG stays blocked after the call")
 	}
 }

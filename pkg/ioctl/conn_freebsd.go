@@ -42,3 +42,33 @@ func sysIoctl(fd int) ioctlFunc {
 		return nil
 	}
 }
+
+const (
+	sigURG      = 16 // the signal Go uses to preempt a goroutine
+	sigBlock    = 1  // SIG_BLOCK
+	sigSetMask  = 3  // SIG_SETMASK
+	sigsetWords = 4  // _SIG_WORDS
+)
+
+// noPreempt blocks SIGURG on the calling thread, which stays the goroutine's
+// thread until the returned function restores the mask. See Conn.DoOnce.
+func noPreempt() func() {
+	runtime.LockOSThread()
+	var set, old [sigsetWords]uint32
+	set[(sigURG-1)/32] = 1 << ((sigURG - 1) % 32)
+	if _, _, e := syscall.RawSyscall(syscall.SYS_SIGPROCMASK, sigBlock, uintptr(unsafe.Pointer(&set[0])), uintptr(unsafe.Pointer(&old[0]))); e != 0 {
+		runtime.UnlockOSThread()
+		return func() {}
+	}
+	return func() {
+		syscall.RawSyscall(syscall.SYS_SIGPROCMASK, sigSetMask, uintptr(unsafe.Pointer(&old[0])), 0)
+		runtime.UnlockOSThread()
+	}
+}
+
+// threadSignalBlocked reports whether SIGURG is blocked on the calling thread.
+func threadSignalBlocked() bool {
+	var cur [sigsetWords]uint32
+	syscall.RawSyscall(syscall.SYS_SIGPROCMASK, sigBlock, 0, uintptr(unsafe.Pointer(&cur[0])))
+	return cur[(sigURG-1)/32]&(1<<((sigURG-1)%32)) != 0
+}

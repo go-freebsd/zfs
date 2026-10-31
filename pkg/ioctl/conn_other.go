@@ -10,3 +10,6 @@ func Open() (*Conn, error) { return nil, ErrUnsupported }
 
 // OpenPath always fails off FreeBSD.
 func OpenPath(path string) (*Conn, error) { return nil, ErrUnsupported }
+
+// noPreempt does nothing off FreeBSD.
+func noPreempt() func() { return func() {} }

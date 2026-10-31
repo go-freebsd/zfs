@@ -194,6 +194,11 @@ const onceDstSize = 1 << 20
 // descriptor) must not run twice. dstSize is the size of the output buffer
 // (1 MiB if not positive). The error detail of a failed call is read as in
 // Do.
+//
+// The Go runtime interrupts long running threads with SIGURG, which makes a
+// kernel sleep (a send waiting for room in a pipe) return EINTR, and a call
+// that has moved data cannot be repeated. So the signal is blocked on the
+// thread for the duration of the call.
 func (c *Conn) DoOnce(ioc IOC, cmd *Cmd, in *nvlist.List, dstSize int) (*nvlist.List, error) {
 	var src []byte
 	if in != nil {
@@ -209,7 +214,9 @@ func (c *Conn) DoOnce(ioc IOC, cmd *Cmd, in *nvlist.List, dstSize int) (*nvlist.
 	cmd.NvlistSrc, cmd.NvlistSrcSize = ptr(src), uint64(len(src))
 	cmd.NvlistDst, cmd.NvlistDstSize, cmd.NvlistDstFilled = ptr(dst), uint64(dstSize), 0
 
+	done := noPreempt()
 	err := c.do(ioc, cmd, &buffers{src: src, dst: dst})
+	done()
 	runtime.KeepAlive(src)
 	runtime.KeepAlive(dst)
 
