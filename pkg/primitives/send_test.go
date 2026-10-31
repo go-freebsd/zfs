@@ -445,7 +445,11 @@ func TestReceiveReadsSeveralStreams(t *testing.T) {
 func TestReceiveIntoAnExistingDatasetUsesItAsTheFilesystem(t *testing.T) {
 	k := newFake(t)
 	c := newClient(k)
-	if _, err := c.Receive(context.Background(), recvInput(stream("pool/src@x", "")), "tank/a", nil); err != nil {
+	// Replacing it takes Force, as with zfs receive.
+	if _, err := c.Receive(context.Background(), recvInput(stream("pool/src@x", "")), "tank/a", nil); !errors.Is(err, syscall.EEXIST) || len(k.writes) != 0 {
+		t.Errorf("without Force: %v, %d kernel calls", err, len(k.writes))
+	}
+	if _, err := c.Receive(context.Background(), recvInput(stream("pool/src@x", "")), "tank/a", &ReceiveOptions{Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if w := k.writes[0]; w.name != "tank/a" {

@@ -295,6 +295,11 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		in.Add("heal", nvlist.Flag{})
 	}
 
+	// A full stream onto an existing dataset needs Force, whatever the
+	// snapshot: libzfs says so before it asks the kernel.
+	if exists && newfs && !o.Force {
+		return rec, &ReceiveError{Received: rec, Err: &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: ds, Errno: syscall.EEXIST}}
+	}
 	var cl *changelist
 	if exists && h.Type == Filesystem && (newfs || h.Resuming && h.FromGUID == 0) {
 		if cl, err = c.gather(ds, "name", false); err != nil {
@@ -409,13 +414,14 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 
 	var got []Received
 	var prev *StreamHeader
+	packages := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return got, err
 		}
 		h, err := ReadStreamHeader(src)
 		if err == io.EOF {
-			if len(got) == 0 {
+			if len(got) == 0 && packages == 0 {
 				return nil, fmt.Errorf("%w: the stream is empty", ErrNotAStream)
 			}
 			return got, nil
@@ -424,6 +430,7 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 			return got, ctxOr(ctx, err)
 		}
 		if h.Compound {
+			packages++
 			recs, err := c.receivePackage(ctx, src, h, target, o, prev)
 			got = append(got, recs...)
 			if err != nil {

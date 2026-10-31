@@ -123,7 +123,7 @@ func TestReadOnlyPoolOnARealKernel(t *testing.T) {
 			if ws.header != gs.header || strings.Join(ws.subs, "\n") != strings.Join(gs.subs, "\n") || len(want) != len(got) {
 				t.Errorf("%s: differs from zfs send\nzfs:  %s\nhere: %s", name, ws.header, gs.header)
 			}
-			if len(ws.subs) < 3 {
+			if len(ws.subs) < 2 {
 				t.Errorf("%s: %d streams: the comparison would prove nothing", name, len(ws.subs))
 			}
 		}

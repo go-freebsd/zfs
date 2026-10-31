@@ -109,6 +109,7 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | `-n` | `DryRun` |
 | `-d` `-e`, `-A` | `DiscardPool`, `LastElement`, `Dataset.AbortResume` |
 | `-k` | `SkipHolds` |
+| `zpool import -o readonly=on` | mounts get `ro`, a send takes no holds, writes fail with `ErrReadOnlyPool` |
 
 Single-snapshot streams made here are byte for byte the streams `zfs send` makes, and the CI
 feeds them to `zfs receive` and the other way round.
@@ -145,7 +146,9 @@ tree gets its encryption roots back afterwards. The tree is mounted once at the 
 Differences and limits: `SendSize` of a replication stream adds up the estimates of its
 streams and, like `zfs send -n`, counts the first stream of a clone as a full one.
 `Intermediates` now writes the replication stream `zfs send -I` writes (earlier versions
-wrote the plain streams one after the other; `Receive` takes both). The header is limited
+wrote the plain streams one after the other; `Receive` takes both). A replication stream
+whose stream for a child lacks the child's base snapshot (dropped from the middle) is an
+error here; `zfs receive` exits 0 and leaves the child out. The header is limited
 to 128 MiB. Not done: `send -b`, resuming a replication stream, redacted `-R`, `receive -o`
 per dataset. `ErrReplicationStream` is no longer returned.
 
