@@ -125,13 +125,8 @@ func treeState(t *testing.T, root string) []string {
 		}
 		out = append(out, "list\t"+norm(strings.Join(r, "\t")))
 	}
-	if h, err := exec.Command("zfs", "holds", "-rH", root).Output(); err == nil {
-		for _, l := range lines(strings.TrimRight(string(h), "\n")) {
-			f := strings.Split(l, "\t")
-			if len(f) >= 2 {
-				out = append(out, "hold\t"+norm(f[0])+"\t"+f[1])
-			}
-		}
+	for _, f := range holdRows(root) {
+		out = append(out, "hold\t"+norm(f[0])+"\t"+f[1])
 	}
 	sort.Strings(out)
 	return out
@@ -188,6 +183,9 @@ func TestReceiveReplicationStreamsLikeZfs(t *testing.T) {
 			t.Fatalf("%s: nothing was received", name)
 		}
 		sameTrees(t, name, ref, mine)
+		if strings.Contains(name, "h") && len(holdRows(mine)) == 0 {
+			t.Errorf("%s: the holds were not received", name)
+		}
 		t.Logf("%s: %d streams, %d facts", name, len(got), len(treeState(t, mine)))
 		releaseAll(ref)
 		releaseAll(mine)
@@ -196,15 +194,28 @@ func TestReceiveReplicationStreamsLikeZfs(t *testing.T) {
 	}
 }
 
-// releaseAll drops every hold below root.
-func releaseAll(root string) {
-	out, err := exec.Command("zfs", "holds", "-rH", root).Output()
-	if err != nil {
-		return
+// holdRows lists the holds on the snapshots below root as (snapshot, tag).
+func holdRows(root string) [][]string {
+	snaps, err := exec.Command("zfs", "list", "-rH", "-t", "snapshot", "-o", "name", root).Output()
+	if err != nil || len(bytes.TrimSpace(snaps)) == 0 {
+		return nil
 	}
+	out, err := exec.Command("zfs", append([]string{"holds", "-H"}, strings.Fields(string(snaps))...)...).Output()
+	if err != nil {
+		return nil
+	}
+	var rows [][]string
 	for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if f := strings.Split(l, "\t"); len(f) >= 2 {
-			exec.Command("zfs", "release", f[1], f[0]).Run()
+			rows = append(rows, f[:2])
 		}
+	}
+	return rows
+}
+
+// releaseAll drops every hold below root.
+func releaseAll(root string) {
+	for _, f := range holdRows(root) {
+		exec.Command("zfs", "release", f[1], f[0]).Run()
 	}
 }
