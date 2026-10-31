@@ -133,6 +133,11 @@ func (c *Client) receivePackage(ctx context.Context, src *os.File, h *StreamHead
 	if reconciling && c.reconcile(p, tofs, o, nil) {
 		soft = true
 	}
+	if p.Raw && !soft && !o.DryRun && top != "" {
+		if err := c.fixEncryptionHierarchy(p, top); err != nil {
+			return got, fmt.Errorf("zfs: receive: restoring the encryption roots: %w", err)
+		}
+	}
 	var mountErr error
 	if !o.DryRun && !o.NoMount && top != "" {
 		mountErr = c.MountAll(top, nil)
@@ -180,5 +185,83 @@ func (c *Client) setReceivedProps(snapshot string, props *nvlist.List) error {
 	}
 	cmd.Cookie = 1
 	_, err := c.c.Do(ioctl.IOCSetProp, cmd, props)
+	return err
+}
+
+// dcp_cmd_t values of <sys/dsl_crypt.h> that need no key.
+const (
+	dcpForceNewKey  = 4
+	dcpForceInherit = 5
+)
+
+// fixEncryptionHierarchy is recv_fix_encryption_hierarchy: after a raw
+// replication stream every dataset received as an encryption root on its own
+// is turned back into what the sender had, an encryption root or a dataset
+// that uses its parent's key.
+func (c *Client) fixEncryptionHierarchy(p *Package, top string) error {
+	for _, fs := range p.Filesystems() {
+		snaps, ok := fs.List("snaps")
+		if !ok {
+			continue
+		}
+		var fsname string
+		for _, sp := range snaps.Pairs() {
+			g, _ := sp.Value.(uint64)
+			if n, err := c.findByGUID(top, g, false); err == nil {
+				fsname, _, _ = strings.Cut(n, "@")
+				break
+			}
+		}
+		if fsname == "" {
+			continue
+		}
+		d, err := c.get(fsname, false, nil)
+		if err != nil {
+			return err
+		}
+		if enc, _ := d.Enum("encryption"); enc == "" || enc == "off" {
+			continue
+		}
+		root, _ := d.String("encryptionroot")
+		isRoot := root == fsname
+		streamRoot := fs.Has("is_encroot")
+
+		if streamRoot {
+			if d.Origin == "" && !isRoot {
+				if err := c.changeKeyCmd(fsname, dcpForceNewKey); err != nil {
+					return err
+				}
+			}
+			props, _ := fs.List("props")
+			want, ok := "", false
+			if props != nil {
+				want, ok = props.String("keylocation")
+			}
+			if ok {
+				cur, err := c.get(fsname, false, []string{"keylocation"})
+				if err != nil {
+					return err
+				}
+				if have, _ := cur.String("keylocation"); have != want {
+					if err := c.SetProps(fsname, map[string]any{"keylocation": want}); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if !streamRoot && isRoot && top != fsname {
+			if err := c.changeKeyCmd(fsname, dcpForceInherit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// changeKeyCmd issues a key change that needs no key (the "force" commands).
+func (c *Client) changeKeyCmd(dataset string, cmd uint64) error {
+	in := nvlist.New()
+	in.Add("crypt_cmd", cmd)
+	_, err := c.c.Call(ioctl.IOCChangeKey, dataset, in)
 	return err
 }
