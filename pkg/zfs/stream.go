@@ -11,9 +11,10 @@ import (
 // (a file, a pipe, a socket's File) the kernel writes to it directly; any
 // other writer is fed through a pipe, and an error from w ends the send.
 //
-// The options select the incremental source (SendFrom, SendIntermediates)
-// and the stream format (LargeBlocks, EmbeddedData, Compressed, Raw,
-// RedactedWith), and OnProgress reports how far it has come. Cancelling
+// The options select the incremental source (SendFrom, SendIntermediates),
+// a replication stream (Replicate, SendProps, SendHolds) and the stream
+// format (LargeBlocks, EmbeddedData, Compressed, Raw, RedactedWith), and
+// OnProgress reports how far it has come. Cancelling
 // ctx stops a send to a writer that is not an *os.File.
 func (s *Snapshot) Send(ctx context.Context, w io.Writer, opts ...Option) error {
 	cfg, err := collect("send", scSend, opts)
@@ -83,7 +84,8 @@ func (c *Client) ResumeSend(ctx context.Context, w io.Writer, token string, opts
 // More than one stream may follow each other, as Send with SendIntermediates
 // writes them; each is received in turn. The result lists what was
 // received, also when a later stream failed. Replication streams (zfs send
-// -R, -p, -I) are refused with ErrReplicationStream.
+// -R, -p, -I, -h) are received stream by stream, with the properties,
+// snapshot properties and holds of their datasets.
 //
 // If r is an *os.File the kernel reads from it directly. Cancelling ctx ends
 // the transfer from any other reader; the goroutine copying from r then ends

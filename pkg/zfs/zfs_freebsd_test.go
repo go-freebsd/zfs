@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -994,4 +995,66 @@ func mustSend(t *testing.T, ctx context.Context, s *Snapshot) []byte {
 		t.Fatal(err)
 	}
 	return b.Bytes()
+}
+
+// A replication stream goes from Send to Receive through an io.Pipe, with no
+// file or process in between: the tree arrives with its snapshots (same
+// GUIDs), its child and its properties as received values.
+func TestScenarioReplicationOverAPipe(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	src := mountedSource(t, pool, "rp_src", map[string]string{"f": "1"}, WithCompression(LZ4))
+	kid, err := src.CreateFilesystem("kid", WithMountpoint("none"), WithQuota(32<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "b"} {
+		if _, err := src.SnapshotAll(ctx, n, Recursive()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	top := c.Snapshot(src.Name() + "@b")
+
+	dst := pool.Child("rp_dst")
+	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", dst.Name()).Run() })
+	pr, pw := io.Pipe()
+	sendErr := make(chan error, 1)
+	go func() {
+		err := top.Send(ctx, pw, Replicate())
+		pw.CloseWithError(err)
+		sendErr <- err
+	}()
+	got, err := dst.Receive(ctx, pr, NoMount())
+	if err != nil {
+		t.Fatalf("receive: %v (%d streams)", err, len(got))
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("received %d streams, want 4 (a and b of two datasets)", len(got))
+	}
+	for _, n := range []string{"@a", "@b"} {
+		if guidOf(t, dst.Name()+n) != guidOf(t, src.Name()+n) {
+			t.Errorf("%s differs", n)
+		}
+		if guidOf(t, dst.Name()+"/kid"+n) != guidOf(t, kid.Name()+n) {
+			t.Errorf("kid%s differs", n)
+		}
+	}
+	for ds, want := range map[string]string{dst.Name(): "compression\tlz4\treceived", dst.Name() + "/kid": "quota\t33554432\treceived"} {
+		out := zrun2(t, "zfs", "get", "-Hp", "-o", "property,value,source", strings.Split(want, "\t")[0], ds)
+		if strings.TrimSpace(out) != want {
+			t.Errorf("%s: got %q, want %q", ds, strings.TrimSpace(out), want)
+		}
+	}
+}
+
+func zrun2(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(name, args...).Output()
+	if err != nil {
+		t.Fatalf("%s %v: %v", name, args, err)
+	}
+	return string(out)
 }

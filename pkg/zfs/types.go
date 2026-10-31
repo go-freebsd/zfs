@@ -142,9 +142,18 @@ type ResumeToken = primitives.ResumeToken
 
 // Stream errors.
 var (
-	// ErrReplicationStream is returned for streams made by zfs send -R, -p
-	// or -I: a header and several streams, which libzfs takes apart.
+	// ErrReplicationStream is no longer returned: replication streams (zfs
+	// send -R, -p, -I, -h) are received.
+	//
+	// Deprecated: kept so that existing code compiles.
 	ErrReplicationStream = primitives.ErrCompoundStream
+	// ErrBadReplicationStream is returned for a replication stream whose
+	// header is damaged: a payload that is not an nvlist or a checksum that
+	// does not match.
+	ErrBadReplicationStream = primitives.ErrBadPackage
+	// ErrSendIncomplete is returned, after the stream was written, when some
+	// datasets or snapshots could not be sent; the stream holds the rest.
+	ErrSendIncomplete = primitives.ErrSendIncomplete
 	// ErrNotAStream is returned for input that is not a ZFS send stream.
 	ErrNotAStream = primitives.ErrNotAStream
 	// ErrNotMountable is matched by the error of mounting a dataset that has

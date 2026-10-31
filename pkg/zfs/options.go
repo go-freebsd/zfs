@@ -228,13 +228,46 @@ func SendFrom(from Pointer) Option {
 	return Option{name: "SendFrom", scope: scSend, apply: func(c *config) { c.send.From = from.Name() }}
 }
 
-// SendIntermediates sends every snapshot between from and the one sent, each
-// as its own stream, one after the other (like zfs send -I). from must be a
-// snapshot. Receive takes the result, and so does zfs receive.
+// SendIntermediates sends every snapshot between from and the one sent, in
+// one replication stream (like zfs send -I). from must be a snapshot. Receive
+// takes the result, and so does zfs receive.
 func SendIntermediates(from *Snapshot) Option {
 	return Option{name: "SendIntermediates", scope: scSend, apply: func(c *config) {
 		c.send.From, c.send.Intermediates = from.Name(), true
 	}}
+}
+
+// Replicate sends the dataset of the snapshot with everything below it: the
+// descendants, their snapshots, clones and properties (zfs send -R). The
+// result is one replication stream, which Dataset.Receive takes apart.
+// Combined with SendFrom it is incremental.
+func Replicate() Option {
+	return Option{name: "Replicate", scope: scSend, apply: func(c *config) { c.send.Replicate = true }}
+}
+
+// SendProps sends the properties of the dataset and the snapshot in front of
+// the stream (zfs send -p).
+func SendProps() Option {
+	return Option{name: "SendProps", scope: scSend, apply: func(c *config) { c.send.Props = true }}
+}
+
+// SendHolds sends the holds on the snapshots too (zfs send -h); a receive
+// puts them back unless it uses SkipHolds.
+func SendHolds() Option {
+	return Option{name: "SendHolds", scope: scSend, apply: func(c *config) { c.send.Holds = true }}
+}
+
+// SkipMissing skips descendants that lack the snapshot, with a warning,
+// instead of failing (zfs send --skip-missing). The warnings come back as an
+// error matching ErrSendIncomplete after the stream is written.
+func SkipMissing() Option {
+	return Option{name: "SkipMissing", scope: scSend, apply: func(c *config) { c.send.SkipMissing = true }}
+}
+
+// SkipHolds does not put back the holds a replication stream carries
+// (zfs receive -k).
+func SkipHolds() Option {
+	return Option{name: "SkipHolds", scope: scReceive, apply: func(c *config) { c.recv.SkipHolds = true }}
 }
 
 // LargeBlocks allows blocks larger than 128 KiB in the stream (zfs send -L).

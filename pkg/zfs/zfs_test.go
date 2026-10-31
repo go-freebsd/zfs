@@ -436,6 +436,18 @@ func TestSendOptionsMapToTheStream(t *testing.T) {
 	if o := s.sendOpts; o.From != "tank/a@old" || !o.Intermediates {
 		t.Errorf("intermediates = %+v", o)
 	}
+	if err := snap.Send(context.Background(), &buf, Replicate(), SendProps(), SendHolds(), SkipMissing(), SendFrom(base)); err != nil {
+		t.Fatal(err)
+	}
+	if o := s.sendOpts; !o.Replicate || !o.Props || !o.Holds || !o.SkipMissing || o.From != "tank/a@old" || o.Intermediates {
+		t.Errorf("replication options = %+v", o)
+	}
+	if _, err := c.Dataset("tank/b").Receive(context.Background(), strings.NewReader(""), SkipHolds()); err != nil {
+		t.Fatal(err)
+	}
+	if !s.recvOpts.SkipHolds {
+		t.Errorf("SkipHolds did not reach the receive: %+v", s.recvOpts)
+	}
 	if err := snap.Send(context.Background(), &buf); err != nil {
 		t.Fatal(err)
 	}
@@ -522,6 +534,9 @@ func TestStreamOptionMisuse(t *testing.T) {
 		"receive option to Send": func() error { return snap.Send(ctx, io.Discard, Force()) },
 		"Resumable to Send":      func() error { return snap.Send(ctx, io.Discard, Resumable()) },
 		"send option to Set":     func() error { return d.Set(Raw()) },
+		"Replicate to Receive":   func() error { _, err := d.Receive(ctx, strings.NewReader(""), Replicate()); return err },
+		"SkipHolds to Send":      func() error { return snap.Send(ctx, io.Discard, SkipHolds()) },
+		"SendHolds to Create":    func() error { _, err := d.CreateFilesystem("x", SendHolds()); return err },
 		"send option to Create":  func() error { _, err := d.CreateFilesystem("x", LargeBlocks()); return err },
 		"encryption to Receive": func() error {
 			_, err := d.Receive(ctx, strings.NewReader(""), WithEncryption(AES256GCM, key))
