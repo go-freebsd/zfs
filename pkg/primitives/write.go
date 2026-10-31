@@ -110,6 +110,11 @@ type CreateOptions struct {
 
 	// Parents creates missing parent filesystems first, as zfs create -p.
 	Parents bool
+
+	// NoMount leaves a new filesystem unmounted. Without it a filesystem
+	// that is mountable and has canmount=on is mounted after it is created,
+	// as zfs create does (this needs FreeBSD and root).
+	NoMount bool
 }
 
 // props builds the property list of a create or clone call.
@@ -163,8 +168,7 @@ func (o *CreateOptions) props(extra map[string]any) (*nvlist.List, []byte, error
 	return in, wkey, nil
 }
 
-// Create creates a filesystem. It is not mounted; the kernel only creates
-// the dataset.
+// Create creates a filesystem and mounts it (see CreateOptions.NoMount).
 func (c *Client) Create(name string, opts *CreateOptions) error {
 	return c.create(name, ostZFS, opts, nil)
 }
@@ -182,8 +186,10 @@ func (c *Client) create(name string, typ int32, opts *CreateOptions, extra map[s
 	if err != nil {
 		return err
 	}
+	var made []string
 	if opts != nil && opts.Parents {
-		if err := c.createParents(name); err != nil {
+		var err error
+		if made, err = c.createParents(name); err != nil {
 			return err
 		}
 	}
@@ -195,26 +201,68 @@ func (c *Client) create(name string, typ int32, opts *CreateOptions, extra map[s
 	if wkey != nil {
 		in.Add("hidden_args", hiddenArgs(wkey))
 	}
-	_, err = c.c.Call(ioctl.IOCCreate, name, in)
-	return err
+	if _, err = c.c.Call(ioctl.IOCCreate, name, in); err != nil {
+		return err
+	}
+	if typ != ostZFS || (opts != nil && opts.NoMount) {
+		return nil
+	}
+	return c.autoMount(append(made, name)...)
 }
 
-// createParents creates every missing ancestor of name below the pool.
-func (c *Client) createParents(name string) error {
+// autoMount mounts the named filesystems in order if they are mountable and
+// have canmount=on (what zfs create, clone and receive do after the kernel
+// made the dataset). It does nothing without a mounter.
+func (c *Client) autoMount(names ...string) error {
+	if c.m == nil {
+		return nil
+	}
+	var errs []error
+	for _, n := range names {
+		d, err := c.get(n, false, nil)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if cm, _ := d.Enum("canmount"); cm != "on" {
+			continue
+		}
+		if ks, _ := d.Enum("keystatus"); ks == "unavailable" {
+			continue // an encrypted dataset without its key waits (a raw receive)
+		}
+		mp, err := c.mountpointOf(d, false)
+		if err != nil {
+			continue // mountpoint none, legacy, jailed, ...
+		}
+		if _, ok, _ := c.IsMounted(n); ok {
+			continue
+		}
+		if err := c.mountAt(d, mp, &MountOptions{}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// createParents creates every missing ancestor of name below the pool,
+// without mounting them, and returns their names.
+func (c *Client) createParents(name string) ([]string, error) {
+	var made []string
 	parts := strings.Split(name, "/")
 	for i := 2; i < len(parts); i++ {
 		parent := strings.Join(parts[:i], "/")
 		ok, err := c.Exists(parent)
 		if err != nil {
-			return err
+			return made, err
 		}
 		if !ok {
-			if err := c.create(parent, ostZFS, nil, nil); err != nil {
-				return err
+			if err := c.create(parent, ostZFS, &CreateOptions{NoMount: true}, nil); err != nil {
+				return made, err
 			}
+			made = append(made, parent)
 		}
 	}
-	return nil
+	return made, nil
 }
 
 func checkDatasetName(name string) error {
@@ -287,8 +335,10 @@ func (c *Client) Clone(name, origin string, opts *CreateOptions) error {
 	if err != nil {
 		return err
 	}
+	var made []string
 	if opts != nil && opts.Parents {
-		if err := c.createParents(name); err != nil {
+		var err error
+		if made, err = c.createParents(name); err != nil {
 			return err
 		}
 	}
@@ -297,8 +347,16 @@ func (c *Client) Clone(name, origin string, opts *CreateOptions) error {
 	if props.Len() > 0 {
 		in.Add("props", props)
 	}
-	_, err = c.c.Call(ioctl.IOCClone, name, in)
-	return err
+	if _, err = c.c.Call(ioctl.IOCClone, name, in); err != nil {
+		return err
+	}
+	if opts != nil && opts.NoMount {
+		return nil
+	}
+	if d, err := c.get(name, true, nil); err == nil && d.Type != Filesystem {
+		return c.autoMount(made...)
+	}
+	return c.autoMount(append(made, name)...)
 }
 
 // DestroyOptions are the settings of Destroy.
@@ -308,6 +366,9 @@ type DestroyOptions struct {
 	// Defer marks a snapshot that is in use for destruction when the last
 	// hold or clone goes away.
 	Defer bool
+	// Force unmounts busy filesystems first (zfs destroy -f). Mounted
+	// filesystems are always unmounted before they are destroyed.
+	Force bool
 }
 
 // Destroy destroys a filesystem, volume, snapshot or bookmark, depending on
@@ -323,6 +384,21 @@ func (c *Client) Destroy(name string, opts *DestroyOptions) error {
 	case strings.Contains(name, "#"):
 		return c.DestroyBookmarks([]string{name})
 	}
+	cl, err := c.gather(name, "name", opts.Force)
+	if err != nil {
+		return err
+	}
+	if err := cl.prefix(); err != nil {
+		return err
+	}
+	if err := c.destroyTree(name, opts); err != nil {
+		cl.postfix() // put back what is still there
+		return err
+	}
+	return nil
+}
+
+func (c *Client) destroyTree(name string, opts *DestroyOptions) error {
 	if opts.Recursive {
 		var snaps, sets []string
 		err := c.Walk(name, ListOptions{Types: Filesystem | Volume | Snapshot, Depth: Unlimited}, func(d *Dataset) error {
@@ -386,6 +462,21 @@ func (c *Client) DestroySnapshots(names []string, deferred bool) error {
 // of that name is renamed in every descendant too. The new name of a
 // filesystem may be below another parent in the same pool.
 func (c *Client) Rename(oldName, newName string, recursive bool) error {
+	cl, err := c.gather(oldName, "name", false)
+	if err != nil {
+		return err
+	}
+	if err := cl.prefix(); err != nil {
+		return err
+	}
+	err = c.renameIoctl(oldName, newName, recursive)
+	if err == nil {
+		cl.renamed(oldName, newName)
+	}
+	return firstThen(err, cl.postfix())
+}
+
+func (c *Client) renameIoctl(oldName, newName string, recursive bool) error {
 	cmd := ioctl.NewCmd()
 	if err := cmd.SetName(oldName); err != nil {
 		return err

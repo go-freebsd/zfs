@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -53,6 +54,28 @@ type ReceiveOptions struct {
 	Layout Layout
 	// Parents creates the missing parent filesystems of the target.
 	Parents bool
+	// Exclude (-x) names properties that the stream's value must not set:
+	// they are inherited on the target instead. A plain stream carries no
+	// properties, so this changes something only for a target that holds
+	// received values already (from an earlier replication stream). The
+	// rules of zfs receive apply: aliases are accepted, a property that is
+	// set locally on an existing target, or does not apply to the dataset
+	// type, is left alone, and encryption properties cannot be excluded
+	// from a raw stream.
+	Exclude []string
+	// NoMount (-u) leaves the received filesystem unmounted. Without it a
+	// new filesystem is mounted after it is received, and one that was
+	// replaced is mounted again, as zfs receive does.
+	NoMount bool
+	// DryRun (-n) checks the stream and where it would go, and reads it to
+	// its end, but receives nothing: no dataset is created, changed or
+	// mounted. The checks are those zfs receive -n makes: the stream must be
+	// well formed, a new filesystem on an existing target needs Force and
+	// no snapshots, an incremental stream needs its base snapshot on the
+	// target and an existing target, a missing parent needs Parents. Data
+	// checksums are not verified, and failures only the kernel can know
+	// (space, features) are not predicted.
+	DryRun bool
 }
 
 // Received is the outcome of receiving one stream.
@@ -66,6 +89,11 @@ type Received struct {
 	ErrorFlags uint64
 	// PropErrors lists properties of the stream that could not be set.
 	PropErrors map[string]error
+	// DryRun is set when nothing was received (ReceiveOptions.DryRun); Bytes
+	// is then the length of the whole stream, header included.
+	DryRun bool
+	// Mounted is where the received filesystem was mounted, if it was.
+	Mounted string
 }
 
 // ReceiveError is the error of a receive that failed. Received holds what
@@ -122,10 +150,13 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		return rec, fmt.Errorf("zfs: receive: %q is not a snapshot name", snapshot)
 	}
 
+	if o.DryRun {
+		return rec, errors.New("zfs: receive: a dry run reads the stream itself, use Receive")
+	}
 	// The ioctl takes the filesystem that holds the new dataset: the target
 	// itself if it exists, else its parent.
 	if o.Parents {
-		if err := c.createParents(ds); err != nil {
+		if _, err := c.createParents(ds); err != nil {
 			return rec, err
 		}
 	}
@@ -134,17 +165,26 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 	if err != nil {
 		return rec, err
 	}
-	if !exists {
+	var target *Dataset
+	if exists {
+		if target, err = c.get(ds, false, nil); err != nil {
+			return rec, err
+		}
+	} else {
 		i := strings.LastIndexByte(ds, '/')
 		if i < 0 {
 			return rec, &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: ds, Errno: syscall.ENOENT}
 		}
 		fsname = ds[:i]
 	}
+	excluded, err := excludeProps(h, o, target)
+	if err != nil {
+		return rec, err
+	}
 
 	in := nvlist.New()
 	in.Add("snapname", snapshot)
-	if len(o.Props) > 0 {
+	if len(o.Props) > 0 || len(excluded) > 0 {
 		lp := nvlist.New()
 		for _, k := range sortedKeys(o.Props) {
 			v, err := convertProp(k, o.Props[k], false)
@@ -152,6 +192,9 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 				return rec, err
 			}
 			lp.Add(k, v)
+		}
+		for _, k := range excluded {
+			lp.Add(k, nvlist.Flag{}) // a boolean entry means -x
 		}
 		in.Add("localprops", lp)
 	}
@@ -174,21 +217,85 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		in.Add("heal", nvlist.Flag{})
 	}
 
-	out, err := c.c.CallOnce(ioctl.IOCRecvNew, fsname, in)
-	if errors.Is(err, ioctl.ErrTruncated) {
-		return rec, nil // it happened; only the statistics are lost
+	// A stream that makes a new filesystem on an existing one replaces it,
+	// which cannot be done online: unmount it and what is below first.
+	newfs := (h.FromGUID == 0 || h.Clone || o.Origin != "") && !h.Resuming
+	var cl *changelist
+	if exists && h.Type == Filesystem && (newfs || h.Resuming && h.FromGUID == 0) {
+		if cl, err = c.gather(ds, "name", false); err != nil {
+			return rec, err
+		}
+		if err := cl.prefix(); err != nil {
+			return rec, err
+		}
 	}
-	if err != nil {
+
+	out, err := c.c.CallOnce(ioctl.IOCRecvNew, fsname, in)
+	recvErr := err
+	if errors.Is(err, ioctl.ErrTruncated) {
+		recvErr = nil // it happened; only the statistics are lost
+	} else if err != nil {
 		var ie *ioctl.Error
 		if errors.As(err, &ie) && ie.Detail != nil {
 			rec.fill(ie.Detail)
 		}
-		return rec, &ReceiveError{Received: rec, Err: err}
-	}
-	if out != nil {
+		recvErr = &ReceiveError{Received: rec, Err: err}
+	} else if out != nil {
 		rec.fill(out)
 	}
-	return rec, nil
+
+	var mountErr error
+	if cl != nil && !o.NoMount {
+		mountErr = cl.postfix()
+	}
+	if recvErr != nil {
+		return rec, recvErr
+	}
+	if !exists && h.Type == Filesystem && !o.NoMount && !h.Redacted() {
+		mountErr = firstThen(mountErr, c.autoMount(ds))
+	}
+	if where, ok, _ := c.IsMounted(ds); ok && !o.NoMount {
+		rec.Mounted = where
+	}
+	return rec, mountErr
+}
+
+// excludeProps applies the rules of zfs_setup_cmdline_props to the -x list:
+// it returns the property names to put into localprops.
+func excludeProps(h *StreamHeader, o *ReceiveOptions, target *Dataset) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range o.Exclude {
+		info, ok := LookupProp(name)
+		if !ok {
+			return nil, propErr(name, ErrUnknownProp, "")
+		}
+		name = info.Name
+		if name == "origin" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if _, clash := o.Props[name]; clash {
+			return nil, fmt.Errorf("zfs: receive: property %q is both set and excluded", name)
+		}
+		switch name {
+		case "encryption", "keyformat", "keylocation", "pbkdf2iters", "pbkdf2salt":
+			if h.Raw() {
+				return nil, fmt.Errorf("zfs: receive: encryption property %q cannot be excluded for raw streams", name)
+			}
+		}
+		if info.Kind != KindUser && h.Type != 0 && info.Types&h.Type == 0 {
+			continue // does not apply to this kind of dataset
+		}
+		if target != nil {
+			if p, present := target.Props[name]; present && p.Source != "$recvd" {
+				continue // set or inherited on the target: its value wins anyway
+			}
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (r *Received) fill(l *nvlist.List) {
@@ -250,7 +357,12 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 		if len(got) > 0 && strings.Contains(target, "@") {
 			return got, errors.New("zfs: receive: the target is a snapshot, but the input holds several streams")
 		}
-		rec, err := c.ReceiveFD(h, int(src.Fd()), name, o)
+		var rec Received
+		if o.DryRun {
+			rec, err = c.receiveDry(h, src, name, o)
+		} else {
+			rec, err = c.ReceiveFD(h, int(src.Fd()), name, o)
+		}
 		got = append(got, rec)
 		if err != nil {
 			return got, ctxOr(ctx, err)

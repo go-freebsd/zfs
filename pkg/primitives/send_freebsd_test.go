@@ -37,7 +37,7 @@ func source(t *testing.T, c *Client, pool, name string, props map[string]any, fi
 	if err := c.Create(ds, &CreateOptions{Props: p}); err != nil {
 		t.Fatal(err)
 	}
-	cli(t, "zfs", "mount", ds)
+	ensureMounted(t, ds)
 	write(t, dir, files)
 	return ds, dir
 }
@@ -399,7 +399,7 @@ func TestRawSendOfAnEncryptedDataset(t *testing.T) {
 	if err := c.Create(src, &CreateOptions{Key: PassphraseKey(pass), Props: map[string]any{"mountpoint": dir}}); err != nil {
 		t.Fatal(err)
 	}
-	cli(t, "zfs", "mount", src)
+	ensureMounted(t, src)
 	write(t, dir, map[string]string{"secret": "the plaintext"})
 	snap(t, c, src+"@a")
 
@@ -627,7 +627,7 @@ func TestRedactedSend(t *testing.T) {
 	if err := c.Clone(clone, src+"@a", &CreateOptions{Props: map[string]any{"mountpoint": cdir}}); err != nil {
 		t.Fatal(err)
 	}
-	cli(t, "zfs", "mount", clone)
+	ensureMounted(t, clone)
 	os.WriteFile(filepath.Join(cdir, "secret"), []byte("REDACTED"), 0o644) // the blocks that differ are left out
 	snap(t, c, clone+"@r")
 	_ = dir

@@ -18,6 +18,7 @@ type caller interface {
 type Client struct {
 	c    caller
 	conn *ioctl.Conn // nil for fakes
+	m    mounter     // mounting; nil in tests that do not mount
 }
 
 // Open opens /dev/zfs. The ZFS kernel module must be loaded.
@@ -26,12 +27,12 @@ func Open() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: conn, conn: conn}, nil
+	return &Client{c: conn, conn: conn, m: osMounter{}}, nil
 }
 
 // NewClient returns a client on an existing connection. The client does not
 // own it: Close does not close conn.
-func NewClient(conn *ioctl.Conn) *Client { return &Client{c: conn} }
+func NewClient(conn *ioctl.Conn) *Client { return &Client{c: conn, m: osMounter{}} }
 
 func newClient(c caller) *Client { return &Client{c: c} }
 

@@ -79,10 +79,38 @@ func (c *Client) SetProps(dataset string, props map[string]any) error {
 	if err := cmd.SetName(dataset); err != nil {
 		return err
 	}
-	if _, err := c.c.Do(ioctl.IOCSetProp, cmd, in); err != nil {
-		return setPropsError(dataset, err)
+	cl, err := c.mountChangelist(dataset, names)
+	if err != nil {
+		return err
 	}
-	return nil
+	if err := cl.prefix(); err != nil {
+		return err
+	}
+	_, err = c.c.Do(ioctl.IOCSetProp, cmd, in)
+	if err != nil {
+		err = setPropsError(dataset, err)
+	}
+	return firstThen(err, cl.postfix())
+}
+
+// mountChangelist makes the changelist for a change of the given properties:
+// only mountpoint and canmount affect mounts.
+func (c *Client) mountChangelist(dataset string, props []string) (*changelist, error) {
+	prop := ""
+	for _, p := range props {
+		switch p {
+		case "mountpoint":
+			prop = "mountpoint"
+		case "canmount":
+			if prop == "" {
+				prop = "canmount"
+			}
+		}
+	}
+	if prop == "" {
+		return &changelist{c: c}, nil
+	}
+	return c.gather(dataset, prop, false)
 }
 
 // InheritProp removes the local value of a property so that the dataset
@@ -104,7 +132,14 @@ func (c *Client) InheritProp(dataset, prop string) error {
 	if err := cmd.SetValue(prop); err != nil {
 		return err
 	}
-	return c.c.Ioctl(ioctl.IOCInheritProp, cmd)
+	cl, err := c.mountChangelist(dataset, []string{prop})
+	if err != nil {
+		return err
+	}
+	if err := cl.prefix(); err != nil {
+		return err
+	}
+	return firstThen(c.c.Ioctl(ioctl.IOCInheritProp, cmd), cl.postfix())
 }
 
 // SetPropsError reports the properties the kernel refused.

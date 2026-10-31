@@ -83,8 +83,12 @@ type StreamHeader struct {
 	ToName     string // "pool/fs@snap" as on the sender
 	PayloadLen uint32 // bytes that follow the record, such as the properties of a resumed stream
 	Resuming   bool   // the stream continues an interrupted one
+	// Clone is set for a stream that creates a clone (DRR_FLAG_CLONE): its
+	// FromGUID is then the origin snapshot, not an incremental base.
+	Clone bool
 
 	swapped bool
+	order   binary.ByteOrder
 	raw     [ioctl.ReplayRecordSize]byte
 }
 
@@ -144,6 +148,8 @@ func ParseStreamHeader(rec []byte) (*StreamHeader, error) {
 	vi := bo.Uint64(rec[16:])
 	h := &StreamHeader{
 		swapped:    swapped,
+		order:      bo,
+		Clone:      bo.Uint32(rec[36:])&1 != 0,
 		PayloadLen: bo.Uint32(rec[4:]),
 		Compound:   vi&3 == hdrCompound,
 		Features:   StreamFeature((vi >> 2) & (1<<30 - 1)),
@@ -269,3 +275,6 @@ func fletcher4Word0(b []byte) uint64 {
 	}
 	return a
 }
+
+// Redacted reports whether the stream is a redacted one (zfs send --redact).
+func (h *StreamHeader) Redacted() bool { return h.Features&FeatureRedacted != 0 }

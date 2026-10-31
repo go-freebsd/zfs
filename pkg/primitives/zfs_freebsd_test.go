@@ -575,3 +575,13 @@ func TestMountpointAndClonesMatchZfsGet(t *testing.T) {
 		t.Errorf("origin = %q", cl.Origin)
 	}
 }
+
+// ensureMounted makes sure the filesystem is mounted: creating one mounts it
+// now, so a "zfs mount" would fail with "already mounted".
+func ensureMounted(t *testing.T, ds string) {
+	t.Helper()
+	exec.Command("zfs", "mount", ds).Run()
+	if got := cli(t, "zfs", "get", "-H", "-o", "value", "mounted", ds); got != "yes" {
+		t.Fatalf("%s is not mounted (%s)", ds, got)
+	}
+}

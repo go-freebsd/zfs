@@ -34,6 +34,10 @@ type fakeKernel struct {
 	inherits []inheritCall            // INHERIT_PROP requests received
 	setFail  map[string]syscall.Errno // properties the "kernel" refuses
 
+	// after, if set, runs after a write or SET_PROP call succeeded; tests use
+	// it to make the change a real kernel would make.
+	after func(w writeCall)
+
 	// hook, if set, runs before a call is served; a non-nil error is returned.
 	hook func(ioc ioctl.IOC, cmd *ioctl.Cmd, n int) error
 	n    int
@@ -63,6 +67,9 @@ func (k *fakeKernel) write(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvl
 	k.writes = append(k.writes, writeCall{ioc, cmd.GetName(), cmd.GetValue(), cmd.Cookie, in})
 	if err := k.writeErr[ioc]; err != nil {
 		return nil, err
+	}
+	if k.after != nil {
+		k.after(k.writes[len(k.writes)-1])
 	}
 	return k.writeOut[ioc], nil
 }
@@ -205,6 +212,11 @@ func (k *fakeKernel) Do(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist
 			return nil, k.fail(ioc, name, syscall.ENOENT)
 		}
 		k.sets = append(k.sets, setCall{name, in})
+		defer func() {
+			if k.after != nil {
+				k.after(writeCall{ioc: ioc, name: name, in: in})
+			}
+		}()
 		var refused *nvlist.List
 		for _, p := range in.Names() {
 			if e, bad := k.setFail[p]; bad {
@@ -422,6 +434,9 @@ func (k *fakeKernel) Ioctl(ioc ioctl.IOC, cmd *ioctl.Cmd) error {
 		cmd.Cookie, cmd.ObjsetType, cmd.PermAction = 1000, 500, 2000
 	case ioctl.IOCInheritProp:
 		k.inherits = append(k.inherits, inheritCall{cmd.GetName(), cmd.GetValue()})
+		if k.after != nil {
+			k.after(writeCall{ioc: ioc, name: cmd.GetName(), value: cmd.GetValue()})
+		}
 	default:
 		k.t.Fatalf("fake: unexpected Ioctl(%v)", ioc)
 	}
