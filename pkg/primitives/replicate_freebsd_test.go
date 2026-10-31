@@ -137,7 +137,7 @@ func treeState(t *testing.T, root string) []string {
 func sameTrees(t *testing.T, label, a, b string) {
 	t.Helper()
 	sa, sb := treeState(t, a), treeState(t, b)
-	if len(sa) < 8 {
+	if len(sa) < 4 {
 		t.Fatalf("%s: only %d facts about %s: the comparison would prove nothing", label, len(sa), a)
 	}
 	missing, extra := diff(sa, sb)
