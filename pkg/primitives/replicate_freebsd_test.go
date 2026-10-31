@@ -120,6 +120,9 @@ func treeState(t *testing.T, root string) []string {
 		out = append(out, norm(strings.Join(r, "\t")))
 	}
 	for _, r := range rows(cli(t, "zfs", "list", "-r", "-t", "all", "-Hp", "-o", "name,guid,origin", root)) {
+		if !strings.Contains(r[0], "@") && len(r) >= 2 {
+			r = append([]string{r[0]}, r[2:]...) // a dataset's own GUID is made at random
+		}
 		out = append(out, "list\t"+norm(strings.Join(r, "\t")))
 	}
 	if h, err := exec.Command("zfs", "holds", "-rH", root).Output(); err == nil {
