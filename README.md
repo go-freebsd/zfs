@@ -98,7 +98,7 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | zfs(8) | here |
 |---|---|
 | `send`, `-i`, `-I` | `Snapshot.Send`, `SendFrom`, `SendIntermediates` |
-| `-R` `-p` `-h` `--skip-missing` | `Replicate`, `SendProps`, `SendHolds`, `SkipMissing` |
+| `-R` `-p` `-h` `-b` `--skip-missing` | `Replicate`, `SendProps`, `SendHolds`, `SendBackup`, `SkipMissing` |
 | `-L` `-e` `-c` `-w` | `LargeBlocks`, `EmbeddedData`, `Compressed`, `Raw` |
 | `-n` | `Snapshot.SendSize` |
 | `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
@@ -149,7 +149,7 @@ streams and, like `zfs send -n`, counts the first stream of a clone as a full on
 wrote the plain streams one after the other; `Receive` takes both). A replication stream
 whose stream for a child lacks the child's base snapshot (dropped from the middle) is an
 error here; `zfs receive` exits 0 and leaves the child out. The header is limited
-to 128 MiB. Not done: `send -b`, `receive -o` per dataset. `ErrReplicationStream` is no longer
+to 128 MiB. Not done: `receive -o` per dataset (the CLI has none either). `ErrReplicationStream` is no longer
 returned.
 
 Not possible, because `zfs` refuses them too (`ErrIncompatibleOptions`, before anything is

@@ -20,7 +20,8 @@ type fakeKernel struct {
 	pools             []string
 	readOnlyPools     map[string]bool // pools imported read-only
 	poolPropCalls     []string
-	bareBookmarkProps bool // answer GET_BOOKMARKS with bare values instead of {value} lists
+	recvdProps        map[string]map[string]any // name -> properties the dataset was received with
+	bareBookmarkProps bool                      // answer GET_BOOKMARKS with bare values instead of {value} lists
 
 	iters   map[uint64]string // cursor token -> parent it was started for
 	nextTok uint64
@@ -330,6 +331,20 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 		return nil, k.fail(ioc, name, syscall.ENOENT)
 	}
 	switch ioc {
+	case ioctl.IOCObjsetRecvdProps:
+		out := nvlist.New()
+		names := make([]string, 0)
+		for n := range k.recvdProps[name] {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			l := nvlist.New()
+			l.Add("value", k.recvdProps[name][n])
+			l.Add("source", "$recvd")
+			out.Add(n, l)
+		}
+		return out, nil
 	case ioctl.IOCGetHolds:
 		out := nvlist.New()
 		tags := make([]string, 0, len(d.holds))

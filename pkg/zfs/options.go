@@ -257,6 +257,14 @@ func SendHolds() Option {
 	return Option{name: "SendHolds", scope: scSend, apply: func(c *config) { c.send.Holds = true }}
 }
 
+// SendBackup sends the properties as they were received instead of the ones
+// in effect, and only for datasets that were received (zfs send -b). Use it
+// to back up what a restore should bring back, without the local settings of
+// the sender; it writes the header like SendProps.
+func SendBackup() Option {
+	return Option{name: "SendBackup", scope: scSend, apply: func(c *config) { c.send.Backup = true }}
+}
+
 // SkipMissing skips descendants that lack the snapshot, with a warning,
 // instead of failing (zfs send --skip-missing). The warnings come back as an
 // error matching ErrSendIncomplete after the stream is written.

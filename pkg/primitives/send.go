@@ -37,6 +37,11 @@ type SendOptions struct {
 	Props bool
 	// Holds (zfs send -h) sends the holds on the snapshots too.
 	Holds bool
+	// Backup (zfs send -b) sends the properties as they were received, not
+	// the ones in effect, and only for datasets that were received at all:
+	// what a backup wants to restore, without local settings of the sender.
+	// It writes the header like Props.
+	Backup bool
 	// SkipMissing (zfs send --skip-missing) skips descendants that lack the
 	// snapshot, with a warning, instead of failing.
 	SkipMissing bool
@@ -155,7 +160,7 @@ func (c *Client) SendSize(snapshot string, o *SendOptions) (uint64, error) {
 			return 0, err
 		}
 	}
-	if o != nil && (o.Replicate || o.Props || o.Holds || o.Intermediates) {
+	if o != nil && (o.Replicate || o.Props || o.Holds || o.Backup || o.Intermediates) {
 		return c.sendPackageSize(snapshot, o)
 	}
 	in := nvlist.New()
@@ -225,12 +230,12 @@ var ErrIncompatibleOptions = errors.New("zfs: send: incompatible options")
 
 // check rejects the combinations zfs_do_send does (cmd/zfs/zfs_main.c).
 func (o *SendOptions) check() error {
-	pkg := o.Replicate || o.Props || o.Holds || o.Intermediates
+	pkg := o.Replicate || o.Props || o.Holds || o.Backup || o.Intermediates
 	switch {
 	case o.Saved && pkg:
-		return fmt.Errorf("%w: a saved send cannot be combined with Replicate, Props, Holds or Intermediates", ErrIncompatibleOptions)
+		return fmt.Errorf("%w: a saved send cannot be combined with Replicate, Props, Holds, Backup or Intermediates", ErrIncompatibleOptions)
 	case (o.ResumeObject != 0 || o.ResumeOffset != 0) && pkg:
-		return fmt.Errorf("%w: a resumed send cannot be combined with Replicate, Props, Holds or Intermediates", ErrIncompatibleOptions)
+		return fmt.Errorf("%w: a resumed send cannot be combined with Replicate, Props, Holds, Backup or Intermediates", ErrIncompatibleOptions)
 	case o.RedactBookmark != "" && (o.Replicate || o.Intermediates):
 		return fmt.Errorf("%w: multiple snapshots cannot be sent redacted", ErrIncompatibleOptions)
 	case o.RedactBookmark != "" && o.Raw:
@@ -253,7 +258,7 @@ func (c *Client) Send(ctx context.Context, snapshot string, w io.Writer, o *Send
 	if err := o.check(); err != nil {
 		return err
 	}
-	if o.Replicate || o.Props || o.Holds || o.Intermediates {
+	if o.Replicate || o.Props || o.Holds || o.Backup || o.Intermediates {
 		return c.sendPackage(ctx, snapshot, w, o)
 	}
 	return c.sendOne(ctx, snapshot, w, o)
@@ -368,7 +373,7 @@ func (c *Client) watchProgress(snapshot string, fd int, o *SendOptions) (stop fu
 func (c *Client) ResumeSend(ctx context.Context, w io.Writer, token string, o *SendOptions) error {
 	if o != nil {
 		// zfs send -t takes no other stream-shaping flag: the token says it all.
-		if o.From != "" || o.Replicate || o.Props || o.Holds || o.Intermediates || o.RedactBookmark != "" {
+		if o.From != "" || o.Replicate || o.Props || o.Holds || o.Backup || o.Intermediates || o.RedactBookmark != "" {
 			return fmt.Errorf("%w: a resumed send takes its shape from the token", ErrIncompatibleOptions)
 		}
 	}

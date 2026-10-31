@@ -1106,3 +1106,69 @@ func TestReplicationResumesLikeZfs(t *testing.T) {
 		}
 	}
 }
+
+// send -b lists the properties as they were received, not as they are now;
+// the header and the streams are those of zfs send -b, and a dataset that was
+// never received lists none.
+func TestSendBackupLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := replTree(t, c, pool, "bk_src")
+	mid := wds(t, pool, "bk_mid")
+	t.Cleanup(func() { releaseAll(mid) })
+	zreceive(t, theirs(t, "-R", "-p", src+"@b"), "-u", mid)
+	// Set since it was received: -b must not see these.
+	cli(t, "zfs", "set", "compression=lz4", mid)
+	cli(t, "zfs", "set", "atime=off", mid+"/kid")
+	cli(t, "zfs", "set", "repl:local=mine", mid)
+	cli(t, "zfs", "set", "repl:note=changed", mid) // received as "hello"
+
+	for name, tc := range map[string]struct {
+		root string
+		args []string
+		opts SendOptions
+	}{
+		"-b on a received tree":    {mid, []string{"-b", mid + "@b"}, SendOptions{Backup: true}},
+		"-Rb on a received tree":   {mid, []string{"-R", "-b", mid + "@b"}, SendOptions{Replicate: true, Backup: true}},
+		"-Rbh":                     {mid, []string{"-R", "-b", "-h", mid + "@b"}, SendOptions{Replicate: true, Backup: true, Holds: true}},
+		"-Rb incremental":          {mid, []string{"-R", "-b", "-i", "@a", mid + "@b"}, SendOptions{Replicate: true, Backup: true, From: "@a"}},
+		"-Rb on a never received":  {src, []string{"-R", "-b", src + "@b"}, SendOptions{Replicate: true, Backup: true}},
+		"-b on the received child": {mid + "/kid", []string{"-b", mid + "/kid@b"}, SendOptions{Backup: true}},
+	} {
+		snapName := tc.args[len(tc.args)-1]
+		want := theirs(t, tc.args...)
+		o := tc.opts
+		got := ours(t, c, snapName, &o)
+		ws, gs := shapeOf(t, want), shapeOf(t, got)
+		if ws.header != gs.header {
+			t.Errorf("%s: header\nzfs:  %s\nhere: %s", name, ws.header, gs.header)
+		}
+		if strings.Join(ws.subs, "\n") != strings.Join(gs.subs, "\n") {
+			t.Errorf("%s: streams\nzfs:\n%s\nhere:\n%s", name, strings.Join(ws.subs, "\n"), strings.Join(gs.subs, "\n"))
+		}
+		if len(want) != len(got) {
+			t.Errorf("%s: %d bytes here, zfs sent %d", name, len(got), len(want))
+		}
+		if strings.Contains(ws.header, "repl:local") {
+			t.Errorf("%s: zfs send -b listed a local property: the test would prove nothing", name)
+		}
+		if tc.root == mid && !strings.Contains(ws.header, "repl:note=hello") && !strings.Contains(ws.header, "compression=") {
+			t.Errorf("%s: the oracle's header lists no received property: %s", name, ws.header)
+		}
+	}
+
+	// -b is not -p: after a local change the headers differ, in both worlds.
+	p := ours(t, c, mid+"@b", &SendOptions{Replicate: true, Props: true})
+	b := ours(t, c, mid+"@b", &SendOptions{Replicate: true, Backup: true})
+	if shapeOf(t, p).header == shapeOf(t, b).header {
+		t.Error("-b and -p wrote the same header after a local change")
+	}
+
+	// And zfs receive makes the same tree from ours as from its own.
+	want := theirs(t, "-R", "-b", mid+"@b")
+	got := ours(t, c, mid+"@b", &SendOptions{Replicate: true, Backup: true})
+	ref, mine := wds(t, pool, "bk_ref"), wds(t, pool, "bk_mine")
+	t.Cleanup(func() { releaseAll(ref); releaseAll(mine) })
+	zreceive(t, want, "-u", ref)
+	zreceive(t, got, "-u", mine)
+	sameTrees(t, "-Rb received", ref, mine)
+}

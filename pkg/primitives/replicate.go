@@ -47,7 +47,7 @@ type replSend struct {
 	from, to string // short names
 	pool     string
 
-	recursive, doall, props, holds, raw, skipMissing bool
+	recursive, doall, props, holds, backup, raw, skipMissing bool
 
 	fss     *nvlist.List
 	entries []*fsEntry
@@ -78,7 +78,7 @@ type sendStep struct {
 }
 
 // wantsHeaderNvlist is gather_props of send_prelim_records.
-func (r *replSend) wantsHeaderNvlist() bool { return r.recursive || r.props || r.holds }
+func (r *replSend) wantsHeaderNvlist() bool { return r.recursive || r.props || r.holds || r.backup }
 
 func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error) {
 	top, to, ok := strings.Cut(snapshot, "@")
@@ -92,6 +92,7 @@ func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error)
 		doall:       o.Intermediates || (o.Replicate && o.From == ""), // zfs send -R sends every snapshot
 		props:       o.Props,
 		holds:       o.Holds,
+		backup:      o.Backup,
 		raw:         o.Raw,
 		skipMissing: o.SkipMissing,
 		bySnap:      map[uint64]*fsEntry{},
@@ -192,8 +193,12 @@ func (r *replSend) iterateFS(d *Dataset) error {
 		nvfs.Add("origin", o.GUID)
 		e.originGUID = o.GUID
 	}
-	if r.props || r.recursive {
-		nvfs.Add("props", sendProps(d))
+	if r.props || r.recursive || r.backup {
+		p, err := r.propsOf(d)
+		if err != nil {
+			return err
+		}
+		nvfs.Add("props", p)
 	}
 	if enc, _ := d.Enum("encryption"); enc != "" && enc != "off" {
 		if root, _ := d.String("encryptionroot"); root == d.Name {
@@ -234,7 +239,11 @@ func (r *replSend) iterateFS(d *Dataset) error {
 				r.seenTo = true
 			}
 		}
-		snapProps.Add(name, sendProps(s))
+		sp, err := r.propsOf(s)
+		if err != nil {
+			return err
+		}
+		snapProps.Add(name, sp)
 		if r.holds {
 			tags := nvlist.New()
 			if hs, err := r.c.Holds(s.Name); err == nil {
@@ -301,6 +310,21 @@ func (r *replSend) iterateFS(d *Dataset) error {
 }
 
 var spaceLimits = map[string]bool{"quota": true, "reservation": true, "refquota": true, "refreservation": true}
+
+// propsOf is the properties a header lists for d: the ones in effect, or with
+// Backup (send_iterate_prop with received_only) the received ones.
+func (r *replSend) propsOf(d *Dataset) (*nvlist.List, error) {
+	if !r.backup {
+		return sendProps(d), nil
+	}
+	recvd, err := r.c.receivedProps(d.Name)
+	if err != nil {
+		return nil, err
+	}
+	cp := *d
+	cp.Props = recvd
+	return sendProps(&cp), nil
+}
 
 // sendProps collects the properties of a dataset or snapshot that go into the
 // header (send_iterate_prop): the ones set on it or received, which are not
@@ -562,7 +586,7 @@ func (c *Client) sendPackage(ctx context.Context, snapshot string, w io.Writer, 
 				break
 			}
 			step := *o
-			step.From, step.Intermediates, step.Replicate, step.Props, step.Holds = s.from, false, false, false, false
+			step.From, step.Intermediates, step.Replicate, step.Props, step.Holds, step.Backup = s.from, false, false, false, false, false
 			stop := c.watchProgress(s.to, fd, &step)
 			err := c.SendFD(s.to, fd, &step)
 			stop()
@@ -605,7 +629,7 @@ func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error
 	var total uint64
 	for _, s := range steps {
 		step := *o
-		step.From, step.Intermediates, step.Replicate, step.Props, step.Holds = s.from, false, false, false, false
+		step.From, step.Intermediates, step.Replicate, step.Props, step.Holds, step.Backup = s.from, false, false, false, false, false
 		if datasetOf(s.from) != datasetOf(s.to) {
 			// The first stream of a clone goes out incremental from its origin,
 			// but zfs send -n estimates it as a full stream, and so do we.
