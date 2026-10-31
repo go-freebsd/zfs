@@ -1009,7 +1009,7 @@ func TestScenarioReplicationOverAPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, n := range []string{"a", "b"} {
-		if _, err := src.SnapshotAll(ctx, n, Recursive()); err != nil {
+		if _, err := src.SnapshotAll(ctx, n); err != nil {
 			t.Fatal(err)
 		}
 	}
