@@ -401,3 +401,48 @@ func TestReceiveReconcilesLikeZfs(t *testing.T) {
 		cli(t, "zfs", "destroy", "-rR", src)
 	}
 }
+
+// cryptFacts lists encryptionroot, keyformat and keylocation of a tree.
+func cryptFacts(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	for _, r := range rows(cli(t, "zfs", "get", "-r", "-Hp", "-o", "name,property,value", "encryptionroot,keyformat,keylocation,encryption", root)) {
+		out = append(out, strings.ReplaceAll(strings.Join(r, "\t"), root, "ROOT"))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// A raw replication stream of an encrypted tree: the child that shares its
+// parent's key and the child with a key of its own arrive with the same
+// encryption roots as zfs receive makes of them.
+func TestReceiveRawReplicationLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := wds(t, pool, "rw_src")
+	if err := c.Create(src, &CreateOptions{Key: PassphraseKey("correct horse battery"), Props: map[string]any{"mountpoint": "none"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(src+"/shared", &CreateOptions{Props: map[string]any{"mountpoint": "none"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(src+"/own", &CreateOptions{Key: PassphraseKey("another passphrase!"), Props: map[string]any{"mountpoint": "none"}}); err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "zfs", "snapshot", "-r", src+"@a")
+	if roots := cryptFacts(t, src); len(roots) < 12 {
+		t.Fatalf("source facts: %v", roots)
+	}
+
+	stream := theirs(t, "-R", "-w", src+"@a")
+	ref, mine := wds(t, pool, "rw_ref"), wds(t, pool, "rw_mine")
+	zreceive(t, stream, "-u", ref)
+	got, err := c.Receive(context.Background(), bytes.NewReader(stream), mine, &ReceiveOptions{NoMount: true})
+	if err != nil {
+		t.Fatalf("receive: %v (%d streams)", err, len(got))
+	}
+	sameTrees(t, "raw -R", ref, mine)
+	a, b := cryptFacts(t, ref), cryptFacts(t, mine)
+	if missing, extra := diff(a, b); len(missing) > 0 || len(extra) > 0 {
+		t.Errorf("encryption facts differ\nonly in zfs receive's copy: %q\nonly in ours: %q", missing, extra)
+	}
+}
