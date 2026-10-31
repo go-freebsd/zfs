@@ -11,6 +11,11 @@ import (
 type DestroyPlan struct {
 	// Snapshots are the full names, grouped by dataset, oldest first.
 	Snapshots []string
+	// Datasets are the filesystems and volumes a destroy of a dataset would
+	// remove, and Order everything (snapshots too) in the order it happens:
+	// a clone before its origin, snapshots before their dataset. Only the
+	// plan of a dataset fills them.
+	Datasets, Order []string
 	// Reclaim is the space destroying them would free (the "would reclaim"
 	// of zfs destroy -nv).
 	Reclaim uint64

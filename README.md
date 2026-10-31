@@ -184,6 +184,19 @@ is the length of the stream. It does not verify data checksums (libzfs does not 
 does not predict failures only the kernel knows, such as a full pool or a target that was
 modified since the base (`ETXTBSY`).
 
+## Destroying datasets
+
+`Dataset.Destroy` is `zfs destroy [-rRfn]`. Without `Recursive()` a dataset with children or
+snapshots is refused, with `Recursive()` one whose snapshots have clones elsewhere is, and the
+error is a `*DependentsError` that names what is in the way (it matches `ErrExists` or
+`ErrBusy`), before anything is changed. `Clones()` (`-R`) destroys those dependents first: a
+clone before its origin, the snapshots of a dataset in one batch before the dataset, in the
+order libzfs uses. `PlanDestroy` (or `DryRun()`) lists the names in that order without
+destroying. The datasets are unmounted first (`ForceUnmount()` for a busy one), the empty mountpoint
+directory of a filesystem with a default or inherited mountpoint is removed as libzfs does, a
+pool root is refused without `Recursive()` and never destroyed, and under `Recursive()` an
+error does not stop the rest (they come back together as a `*BatchError`).
+
 ## Destroying snapshots by specification
 
 `Dataset.DestroySnapshots("a%c", zfs.Recursive(), zfs.Deferred())` is `zfs destroy [-rd]

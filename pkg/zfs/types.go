@@ -194,8 +194,11 @@ const (
 	DiffRenamed  = primitives.DiffRenamed
 )
 
-// DestroyPlan is what destroying snapshots by specification would do.
+// DestroyPlan is what a destroy would do.
 type DestroyPlan = primitives.DestroyPlan
+
+// DependentsError names the dependents that stop a destroy; see Dataset.Destroy.
+type DependentsError = primitives.DependentsError
 
 // StreamSize is the estimate for one stream of a send.
 type StreamSize = primitives.StreamSize

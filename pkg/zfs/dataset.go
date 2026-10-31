@@ -185,14 +185,31 @@ func (d *Dataset) Bookmarks() ([]*Info, error) {
 	return out, nil
 }
 
-// Destroy destroys the dataset. Without Recursive it fails if the dataset
-// has snapshots or children.
+// Destroy destroys the dataset (zfs destroy). Without Recursive it fails if
+// the dataset has snapshots or children, and with Recursive but without
+// Clones if clones of its snapshots live elsewhere; the error is a
+// *DependentsError that names them, and nothing was changed. Under Recursive
+// an error does not stop the rest. Datasets are unmounted first (ForceUnmount
+// for a busy one) and the empty mountpoint directory is removed.
 func (d *Dataset) Destroy(opts ...Option) error {
 	cfg, err := collect("destroy", scDestroyDataset, opts)
 	if err != nil {
 		return wrap("destroy", d.name, err)
 	}
-	return wrap("destroy", d.name, d.c.b.Destroy(d.name, &primitives.DestroyOptions{Recursive: cfg.recursive, Force: cfg.forceUnmount}))
+	return wrap("destroy", d.name, d.c.b.Destroy(d.name, &primitives.DestroyOptions{
+		Recursive: cfg.recursive, Clones: cfg.clones, Force: cfg.forceUnmount, DryRun: cfg.dryRun}))
+}
+
+// PlanDestroy reports what Destroy with the same options would destroy, in
+// the order it happens, without changing anything (zfs destroy -nv). It fails
+// where Destroy would.
+func (d *Dataset) PlanDestroy(opts ...Option) (*DestroyPlan, error) {
+	cfg, err := collect("destroy", scDestroyDataset, opts)
+	if err != nil {
+		return nil, wrap("destroy", d.name, err)
+	}
+	p, err := d.c.b.PlanDestroy(d.name, &primitives.DestroyOptions{Recursive: cfg.recursive, Clones: cfg.clones})
+	return p, wrap("destroy", d.name, err)
 }
 
 // Rename renames the dataset. newName is the full new name, which may be

@@ -741,3 +741,20 @@ func TestSendDedupChangesNothing(t *testing.T) {
 		t.Errorf("SendDedup outside a send: %v", err)
 	}
 }
+
+func TestDatasetDestroyPassesClonesAndDryRun(t *testing.T) {
+	c, s := newStub()
+	d := c.Dataset("tank/a")
+	if err := d.Destroy(Clones(), DryRun()); err != nil || s.last() != "Destroy tank/a" {
+		t.Fatalf("%v %q", err, s.last())
+	}
+	if _, err := d.PlanDestroy(Clones()); err != nil || s.last() != "PlanDestroy tank/atrue true" {
+		t.Errorf("%v %q", err, s.last())
+	}
+	if _, err := d.PlanDestroy(Recursive()); err != nil || s.last() != "PlanDestroy tank/atrue false" {
+		t.Errorf("%v %q", err, s.last())
+	}
+	if err := d.Destroy(Deferred()); !errors.Is(err, ErrInvalidOption) {
+		t.Errorf("Deferred on a dataset: %v", err)
+	}
+}

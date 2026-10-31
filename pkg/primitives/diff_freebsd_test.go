@@ -3,7 +3,9 @@ package primitives
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -289,4 +291,224 @@ func TestSnapshotPropertiesLikeZfs(t *testing.T) {
 	if a, b := snapsBelow(t, ref), snapsBelow(t, mine); a != b {
 		t.Errorf("snapshots differ: %q / %q", a, b)
 	}
+}
+
+// dtree is a tree for the destroy tests: src with a child kid (own mountpoint),
+// a child def (inherited mountpoint), snapshots s1..s3 of all, a mounted clone
+// c1 of src@s2, and a chain kc -> kc@x -> kc2 cloned from kid@s1, all outside src.
+type dtree struct {
+	root, kid, def, c1, kc, kc2 string
+	defDir, c1Dir               string
+}
+
+func newDtree(t *testing.T, c *Client, pool, name string) *dtree {
+	t.Helper()
+	d := &dtree{}
+	var dir string
+	d.root, dir = source(t, c, pool, name, nil, map[string]string{"f": "x"})
+	d.kid, d.def = d.root+"/kid", d.root+"/def"
+	cli(t, "zfs", "create", "-o", "mountpoint="+tdir(t), d.kid)
+	cli(t, "zfs", "create", d.def)
+	d.defDir = filepath.Join(dir, "def")
+	for _, s := range []string{"s1", "s2", "s3"} {
+		cli(t, "zfs", "snapshot", "-r", d.root+"@"+s)
+	}
+	d.c1, d.kc, d.kc2 = wds(t, pool, name+"_c1"), wds(t, pool, name+"_kc"), wds(t, pool, name+"_kc2")
+	d.c1Dir = tdir(t)
+	cli(t, "zfs", "clone", "-o", "mountpoint="+d.c1Dir, d.root+"@s2", d.c1)
+	cli(t, "zfs", "clone", "-o", "mountpoint=none", d.kid+"@s1", d.kc)
+	cli(t, "zfs", "snapshot", d.kc+"@x")
+	cli(t, "zfs", "clone", "-o", "mountpoint=none", d.kc+"@x", d.kc2)
+	return d
+}
+
+// everything lists the datasets and snapshots of the tree and its clones.
+func (d *dtree) everything(t *testing.T, pool, name string) string {
+	t.Helper()
+	out, _ := exec.Command("zfs", "list", "-H", "-t", "all", "-o", "name", "-r", pool).Output()
+	var keep []string
+	for _, l := range lines(string(out)) {
+		if strings.Contains(l, "/w_"+name) {
+			keep = append(keep, strings.ReplaceAll(l, "w_"+name, "ROOT"))
+		}
+	}
+	sort.Strings(keep)
+	return strings.Join(keep, "\n")
+}
+
+func (d *dtree) release() {
+	for _, n := range []string{d.root, d.kid, d.def} {
+		releaseAll(n)
+	}
+}
+
+// namesIn picks the dataset names out of the lines zfs destroy prints.
+func namesIn(pool, text, name string) []string {
+	var out []string
+	for _, l := range lines(text) {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, pool+"/") {
+			out = append(out, strings.ReplaceAll(l, "w_"+name, "ROOT"))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalized(names []string, name string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = strings.ReplaceAll(n, "w_"+name, "ROOT")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// zfs destroy and Destroy refuse the same trees for the same dependents, destroy
+// the same datasets and snapshots with -R (clones before their origins), plan the
+// same names with -n, and remove the default mountpoint directories alike.
+func TestDestroyLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	pair := func(label string) (ref, mine *dtree, rn, mn string) {
+		rn, mn = "dr_ref_"+label, "dr_mine_"+label
+		return newDtree(t, c, pool, rn), newDtree(t, c, pool, mn), rn, mn
+	}
+	cleanup := func(ts ...*dtree) {
+		for _, d := range ts {
+			d.release()
+			for _, n := range []string{d.kc2, d.kc, d.c1} {
+				exec.Command("zfs", "destroy", "-rf", n).Run()
+			}
+			exec.Command("zfs", "destroy", "-rRf", d.root).Run()
+		}
+	}
+
+	t.Run("plain", func(t *testing.T) {
+		ref, mine, rn, mn := pair("plain")
+		defer cleanup(ref, mine)
+		out, err := exec.Command("zfs", "destroy", ref.root).CombinedOutput()
+		var de *DependentsError
+		mErr := c.Destroy(mine.root, nil)
+		if err == nil || !errors.As(mErr, &de) {
+			t.Fatalf("zfs destroy: %v %q; here: %v", err, out, mErr)
+		}
+		if a, b := namesIn(pool, string(out), rn), normalized(de.Children, mn); strings.Join(a, ",") != strings.Join(b, ",") || len(a) == 0 {
+			t.Errorf("children in the way\nzfs: %v\nhere: %v", a, b)
+		}
+		if a, b := ref.everything(t, pool, rn), mine.everything(t, pool, mn); a != b {
+			t.Errorf("trees differ\n%s\n---\n%s", a, b)
+		}
+	})
+
+	t.Run("recursive stops at the clones", func(t *testing.T) {
+		ref, mine, rn, mn := pair("rec")
+		defer cleanup(ref, mine)
+		out, err := exec.Command("zfs", "destroy", "-r", ref.root).CombinedOutput()
+		var de *DependentsError
+		mErr := c.Destroy(mine.root, &DestroyOptions{Recursive: true})
+		if err == nil || !errors.As(mErr, &de) {
+			t.Fatalf("zfs destroy -r: %v %q; here: %v", err, out, mErr)
+		}
+		if a, b := namesIn(pool, string(out), rn), normalized(de.Clones, mn); strings.Join(a, ",") != strings.Join(b, ",") || len(a) < 4 {
+			t.Errorf("clones in the way\nzfs: %v\nhere: %v", a, b)
+		}
+		if a, b := ref.everything(t, pool, rn), mine.everything(t, pool, mn); a != b {
+			t.Errorf("trees differ\n%s\n---\n%s", a, b)
+		}
+	})
+
+	t.Run("dry run", func(t *testing.T) {
+		ref, mine, rn, mn := pair("dry")
+		defer cleanup(ref, mine)
+		out, err := exec.Command("zfs", "destroy", "-R", "-n", "-p", ref.root).CombinedOutput()
+		if err != nil {
+			t.Fatalf("zfs destroy -Rnp: %v %s", err, out)
+		}
+		var want []string
+		for _, l := range lines(string(out)) {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "destroy" {
+				want = append(want, f[1])
+			}
+		}
+		plan, err := c.PlanDestroy(mine.root, &DestroyOptions{Clones: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, b := normalized(want, rn), normalized(plan.Order, mn); strings.Join(a, ",") != strings.Join(b, ",") || len(a) < 10 {
+			t.Errorf("plan\nzfs: %v\nhere: %v", a, b)
+		}
+		if err := c.Destroy(mine.root, &DestroyOptions{Clones: true, DryRun: true}); err != nil {
+			t.Error(err)
+		}
+		if a, b := ref.everything(t, pool, rn), mine.everything(t, pool, mn); a != b || a == "" {
+			t.Errorf("a dry run changed something\n%s\n---\n%s", a, b)
+		}
+	})
+
+	t.Run("recursive with clones", func(t *testing.T) {
+		ref, mine, rn, mn := pair("all")
+		defer cleanup(ref, mine)
+		if out, err := exec.Command("zfs", "destroy", "-R", ref.root).CombinedOutput(); err != nil {
+			t.Fatalf("zfs destroy -R: %v %s", err, out)
+		}
+		if err := c.Destroy(mine.root, &DestroyOptions{Clones: true}); err != nil {
+			t.Fatalf("Destroy with Clones: %v", err)
+		}
+		if a, b := ref.everything(t, pool, rn), mine.everything(t, pool, mn); a != b || a != "" {
+			t.Errorf("what is left\nzfs:\n%s\nhere:\n%s", a, b)
+		}
+		// The directory of the inherited mountpoint is gone, as with the CLI.
+		for name, d := range map[string]*dtree{"zfs": ref, "here": mine} {
+			if _, err := os.Stat(d.defDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("%s: the mountpoint directory of an inherited mountpoint is still there: %v", name, err)
+			}
+		}
+	})
+
+	t.Run("busy needs force", func(t *testing.T) {
+		ref, mine, rn, mn := pair("busy")
+		defer cleanup(ref, mine)
+		var held []*os.File
+		for _, d := range []*dtree{ref, mine} {
+			f, err := os.Open(d.c1Dir) // a directory in use keeps the mount busy
+			if err != nil {
+				t.Fatal(err)
+			}
+			held = append(held, f)
+		}
+		refErr := exec.Command("zfs", "destroy", "-R", ref.root).Run()
+		mineErr := c.Destroy(mine.root, &DestroyOptions{Clones: true})
+		if refErr == nil || mineErr == nil {
+			t.Errorf("a busy clone was destroyed: zfs destroy %v; here %v", refErr, mineErr)
+		}
+		if refErr := exec.Command("zfs", "destroy", "-R", "-f", ref.root).Run(); refErr != nil {
+			t.Fatalf("zfs destroy -Rf: %v", refErr)
+		}
+		for _, f := range held {
+			f.Close()
+		}
+		// Held open again for the forced run on our side.
+		f, err := os.Open(mine.c1Dir)
+		if err == nil {
+			defer f.Close()
+		}
+		if err := c.Destroy(mine.root, &DestroyOptions{Clones: true, Force: true}); err != nil {
+			t.Fatalf("Destroy with Clones and Force: %v", err)
+		}
+		if a, b := ref.everything(t, pool, rn), mine.everything(t, pool, mn); a != b {
+			t.Errorf("trees differ\n%s\n---\n%s", a, b)
+		}
+	})
+
+	t.Run("pool", func(t *testing.T) {
+		if err := exec.Command("zfs", "destroy", pool).Run(); err == nil {
+			t.Fatal("zfs destroy of a pool root succeeded")
+		}
+		if err := c.Destroy(pool, nil); err == nil {
+			t.Error("Destroy of a pool root succeeded")
+		}
+		if err := c.Destroy(pool+"/w_nothing_here", &DestroyOptions{Defer: true}); err == nil {
+			t.Error("Defer on a dataset was accepted")
+		}
+	})
 }

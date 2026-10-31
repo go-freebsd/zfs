@@ -25,6 +25,7 @@ type backend interface {
 	Clone(name, origin string, opts *primitives.CreateOptions) error
 	Snapshot(names []string, props map[string]any) error
 	Destroy(name string, opts *primitives.DestroyOptions) error
+	PlanDestroy(name string, opts *primitives.DestroyOptions) (*primitives.DestroyPlan, error)
 	PlanDestroySnapshots(dataset, spec string, recursive, deferred bool) (*primitives.DestroyPlan, error)
 	DestroySnapshotSpec(dataset, spec string, recursive, deferred bool) ([]string, error)
 	Rename(oldName, newName string, recursive bool) error

@@ -386,6 +386,7 @@ func (k *fakeKernel) renameTree(old, new string) {
 
 func TestDestroyUnmountsFirst(t *testing.T) {
 	c, k, m := mountedClient(t)
+	noClones(k)
 	c.Mount("tank/a", nil)
 	c.Mount("tank/a/child", nil)
 	k.calls = nil

@@ -341,8 +341,17 @@ func TestDestroyRoutesByName(t *testing.T) {
 	}
 }
 
+// noClones makes tank/a@s1 a snapshot nothing was cloned from, so that a
+// recursive destroy is not stopped by the clone zfs destroy would refuse.
+func noClones(k *fakeKernel) {
+	s1 := k.ds["tank/a@s1"]
+	delete(s1.props, "clones")
+	s1.clones = 0
+}
+
 func TestDestroyRecursiveOrder(t *testing.T) {
 	k := newFake(t)
+	noClones(k)
 	c := newClient(k)
 	if err := c.Destroy("tank/a", &DestroyOptions{Recursive: true}); err != nil {
 		t.Fatal(err)
@@ -351,11 +360,13 @@ func TestDestroyRecursiveOrder(t *testing.T) {
 	for _, w := range k.writes {
 		seq = append(seq, w.ioc.String()+" "+w.name)
 	}
-	if len(seq) != 3 || !strings.HasPrefix(seq[0], "ZFS_IOC_DESTROY_SNAPS") ||
-		seq[1] != "ZFS_IOC_DESTROY tank/a/child" || seq[2] != "ZFS_IOC_DESTROY tank/a" {
+	// The order of libzfs: the child, then the snapshots of the parent in one
+	// batch, then the parent.
+	if len(seq) != 3 || seq[0] != "ZFS_IOC_DESTROY tank/a/child" ||
+		!strings.HasPrefix(seq[1], "ZFS_IOC_DESTROY_SNAPS") || seq[2] != "ZFS_IOC_DESTROY tank/a" {
 		t.Errorf("sequence = %v", seq)
 	}
-	snaps, _ := k.writes[0].in.List("snaps")
+	snaps, _ := k.writes[1].in.List("snaps")
 	if !reflect.DeepEqual(snaps.SortedNames(), []string{"tank/a@s1", "tank/a@s2", "tank/a@s3"}) {
 		t.Errorf("snaps = %v", snaps.Names())
 	}

@@ -44,6 +44,8 @@ type config struct {
 	key       *Key
 	parents   bool
 	recursive bool
+	clones    bool
+	dryRun    bool
 	deferred  bool
 	depth     int
 	types     Kind
@@ -199,6 +201,13 @@ func ForceUnmount() Option {
 // Recursive destroys the descendants and snapshots of a dataset too.
 func Recursive() Option {
 	return Option{name: "Recursive", scope: scDestroyDataset | scDestroyRange, apply: func(c *config) { c.recursive = true }}
+}
+
+// Clones also destroys what depends on the dataset outside its tree: the
+// clones of its snapshots, theirs in turn (zfs destroy -R). It implies
+// Recursive.
+func Clones() Option {
+	return Option{name: "Clones", scope: scDestroyDataset | scDestroyRange, apply: func(c *config) { c.clones, c.recursive = true, true }}
 }
 
 // Deferred marks a snapshot that is held or cloned for destruction once
@@ -377,8 +386,10 @@ func Exclude(props ...string) Option {
 // DryRun checks the stream and where it would go and reads it to its end,
 // but receives and mounts nothing (zfs receive -n). The Received values have
 // DryRun set. See primitives.ReceiveOptions.DryRun for what is checked.
+// With Dataset.Destroy it only checks and plans (zfs destroy -n; see
+// Dataset.PlanDestroy).
 func DryRun() Option {
-	return Option{name: "DryRun", scope: scReceive, apply: func(c *config) { c.recv.DryRun = true }}
+	return Option{name: "DryRun", scope: scReceive | scDestroyDataset, apply: func(c *config) { c.recv.DryRun, c.dryRun = true, true }}
 }
 
 // LastElement keeps only the last element of the dataset path in the stream

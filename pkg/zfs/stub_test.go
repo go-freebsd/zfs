@@ -170,6 +170,10 @@ func (s *stub) DestroySnapshotSpec(dataset, spec string, recursive, deferred boo
 	return []string{dataset + "@x"}, s.rec("DestroySnapshotSpec", dataset, "@", spec, fmt.Sprint(recursive, deferred))
 }
 
+func (s *stub) PlanDestroy(name string, opts *primitives.DestroyOptions) (*primitives.DestroyPlan, error) {
+	return &primitives.DestroyPlan{Order: []string{name}}, s.rec("PlanDestroy", name, fmt.Sprint(opts.Recursive, opts.Clones))
+}
+
 func (s *stub) SendSizes(snapshot string, o *primitives.SendOptions) ([]primitives.StreamSize, error) {
 	return []primitives.StreamSize{{To: snapshot, Bytes: 4242}}, s.rec("SendSizes", snapshot)
 }
