@@ -154,6 +154,10 @@ func (s *stub) Send(ctx context.Context, snapshot string, w io.Writer, o *primit
 	s.sendOpts, s.writer = o, w
 	return s.rec("Send", snapshot)
 }
+func (s *stub) SendSizes(snapshot string, o *primitives.SendOptions) ([]primitives.StreamSize, error) {
+	return []primitives.StreamSize{{To: snapshot, Bytes: 4242}}, s.rec("SendSizes", snapshot)
+}
+
 func (s *stub) SendSize(snapshot string, o *primitives.SendOptions) (uint64, error) {
 	s.sendOpts = o
 	return 4242, s.rec("SendSize", snapshot)

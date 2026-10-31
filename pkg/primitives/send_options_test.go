@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/go-freebsd/nvlist/pkg/nvlist"
+	"github.com/go-freebsd/zfs/pkg/ioctl"
 	"testing"
 )
 
@@ -21,7 +23,6 @@ func TestIncompatibleSendOptions(t *testing.T) {
 		"redact with -R":        {RedactBookmark: "#b", Replicate: true},
 		"redact with -I":        {RedactBookmark: "#b", From: "a", Intermediates: true},
 		"redact with raw":       {RedactBookmark: "#b", Raw: true},
-		"redact with -p":        {RedactBookmark: "#b", Props: true},
 		"redact with -R and -w": {RedactBookmark: "#b", Replicate: true, Raw: true},
 	}
 	for name, o := range cases {
@@ -50,4 +51,24 @@ func TestIncompatibleSendOptions(t *testing.T) {
 			t.Errorf("resume with %s: %v %v", name, err, k.calls)
 		}
 	}
+}
+
+func TestSendSizesIsOneStreamForAPlainSendAndTheSumIsSendSize(t *testing.T) {
+	k := newFake(t)
+	c := newClient(k)
+	out := nvlistWith("space", uint64(777))
+	k.writeOut = map[ioctl.IOC]*nvlist.List{ioctl.IOCSendSpace: out}
+	sizes, err := c.SendSizes("tank/a@s2", &SendOptions{From: "@s1"})
+	if err != nil || len(sizes) != 1 || sizes[0].Bytes != 777 || sizes[0].From != "tank/a@s1" || sizes[0].To != "tank/a@s2" {
+		t.Fatalf("%+v %v", sizes, err)
+	}
+	if _, err := c.SendSizes("tank/a@s2", &SendOptions{Saved: true, Replicate: true}); !errors.Is(err, ErrIncompatibleOptions) {
+		t.Errorf("incompatible options: %v", err)
+	}
+}
+
+func nvlistWith(name string, v any) *nvlist.List {
+	l := nvlist.New()
+	l.Add(name, v)
+	return l
 }

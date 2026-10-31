@@ -35,6 +35,17 @@ func (s *Snapshot) SendSize(opts ...Option) (uint64, error) {
 	return n, wrap("send size", s.name, err)
 }
 
+// SendSizes estimates the size of each stream a send would write, in order
+// (zfs send -nvP prints one line per stream). SendSize is their sum.
+func (s *Snapshot) SendSizes(opts ...Option) ([]StreamSize, error) {
+	cfg, err := collect("send size", scSend, opts)
+	if err != nil {
+		return nil, wrap("send size", s.name, err)
+	}
+	n, err := s.c.b.SendSizes(s.name, cfg.sendOpts())
+	return n, wrap("send size", s.name, err)
+}
+
 // Redact makes the redaction bookmark of a redacted send: blocks that
 // differ between the snapshot and each of the redaction snapshots (snapshots
 // of clones of this one) are left out of a stream sent with RedactedWith.

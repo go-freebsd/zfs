@@ -721,3 +721,55 @@ func (w *cancelAfter) Write(p []byte) (int, error) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("network down") }
+
+// A redacted stream of one snapshot may carry the header of -p and -h, as
+// zfs send -p --redact does; only -R and -I are refused (see
+// TestIncompatibleSendOptions).
+func TestRedactedSendWithPropsAndHolds(t *testing.T) {
+	c, pool := testClient(t)
+	src, _ := source(t, c, pool, "rp_src", map[string]any{"compression": "zle"}, map[string]string{"public": "ok", "secret": "classified"})
+	snap(t, c, src+"@a")
+	cli(t, "zfs", "hold", "keep", src+"@a")
+	t.Cleanup(func() { releaseAll(src) })
+	clone := wds(t, pool, "rp_clone")
+	cdir := tdir(t)
+	if err := c.Clone(clone, src+"@a", &CreateOptions{Props: map[string]any{"mountpoint": cdir}}); err != nil {
+		t.Fatal(err)
+	}
+	ensureMounted(t, clone)
+	os.WriteFile(filepath.Join(cdir, "secret"), []byte("REDACTED"), 0o644)
+	snap(t, c, clone+"@r")
+	if err := c.Redact(src+"@a", "#red", []string{clone + "@r"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		opts SendOptions
+	}{
+		"-p": {[]string{"-p", "--redact", "red", src + "@a"}, SendOptions{Props: true, RedactBookmark: "#red"}},
+		"-h": {[]string{"-h", "--redact", "red", src + "@a"}, SendOptions{Holds: true, RedactBookmark: "#red"}},
+		"-b": {[]string{"-b", "--redact", "red", src + "@a"}, SendOptions{Backup: true, RedactBookmark: "#red"}},
+	} {
+		want := theirs(t, tc.args...)
+		o := tc.opts
+		got := ours(t, c, src+"@a", &o)
+		if len(want) != len(got) {
+			t.Errorf("%s: %d bytes here, zfs sent %d", name, len(got), len(want))
+		}
+		if bytes.Contains(got, []byte("classified")) {
+			t.Errorf("%s: the redacted data is in the stream", name)
+		}
+		ws, gs := shapeOf(t, want), shapeOf(t, got)
+		if ws.header != gs.header || strings.Join(ws.subs, "\n") != strings.Join(gs.subs, "\n") {
+			t.Errorf("%s: header or streams differ\nzfs:  %s %v\nhere: %s %v", name, ws.header, ws.subs, gs.header, gs.subs)
+		}
+		ref, mine := wds(t, pool, "rp_ref"), wds(t, pool, "rp_mine")
+		zreceive(t, want, "-u", ref)
+		zreceive(t, got, "-u", mine)
+		sameTrees(t, name, ref, mine)
+		releaseAll(ref)
+		releaseAll(mine)
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
+	}
+}

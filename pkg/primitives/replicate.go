@@ -113,9 +113,6 @@ func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error)
 	if err := o.check(); err != nil {
 		return nil, err
 	}
-	if o.RedactBookmark != "" {
-		return nil, fmt.Errorf("%w: a stream with Props or Holds cannot be redacted here", ErrIncompatibleOptions)
-	}
 	return r, nil
 }
 
@@ -615,18 +612,59 @@ func (c *Client) sendPackage(ctx context.Context, snapshot string, w io.Writer, 
 // sum of the estimates of its streams, without the header. The estimate is
 // high for a clone, whose first stream is counted as a full one.
 func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error) {
+	sizes, err := c.sendPackageSizes(snapshot, o)
+	var total uint64
+	for _, s := range sizes {
+		total += s.Bytes
+	}
+	return total, err
+}
+
+// StreamSize is the estimate for one stream of a send: From is empty for a
+// full stream.
+type StreamSize struct {
+	From, To string
+	Bytes    uint64
+}
+
+// SendSizes estimates the size of every stream a send would write, in the
+// order they are written (what zfs send -nvP prints line by line). A plain
+// send has one stream; with Replicate, Props, Holds, Backup or Intermediates
+// there is one per snapshot. SendSize is their sum.
+func (c *Client) SendSizes(snapshot string, o *SendOptions) ([]StreamSize, error) {
+	if o == nil {
+		o = &SendOptions{}
+	}
+	if err := o.check(); err != nil {
+		return nil, err
+	}
+	if o.Replicate || o.Props || o.Holds || o.Backup || o.Intermediates {
+		return c.sendPackageSizes(snapshot, o)
+	}
+	n, err := c.SendSize(snapshot, o)
+	if err != nil {
+		return nil, err
+	}
+	from := ""
+	if o.From != "" {
+		from = expand(datasetOf(snapshot), o.From)
+	}
+	return []StreamSize{{From: from, To: snapshot, Bytes: n}}, nil
+}
+
+func (c *Client) sendPackageSizes(snapshot string, o *SendOptions) ([]StreamSize, error) {
 	r, err := c.newReplSend(snapshot, o)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if err := r.gather(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	steps, err := r.plan()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var total uint64
+	var out []StreamSize
 	for _, s := range steps {
 		step := *o
 		step.From, step.Intermediates, step.Replicate, step.Props, step.Holds, step.Backup = s.from, false, false, false, false, false
@@ -637,9 +675,9 @@ func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error
 		}
 		n, err := c.SendSize(s.to, &step)
 		if err != nil {
-			return 0, fmt.Errorf("zfs: send size %s: %w", s.to, err)
+			return nil, fmt.Errorf("zfs: send size %s: %w", s.to, err)
 		}
-		total += n
+		out = append(out, StreamSize{From: step.From, To: s.to, Bytes: n})
 	}
-	return total, nil
+	return out, nil
 }

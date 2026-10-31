@@ -479,6 +479,31 @@ func TestSendReplicationSizeMatchesZfs(t *testing.T) {
 		if err != nil || want == 0 || got != want {
 			t.Errorf("%s: SendSize = %d, %v; zfs send -nP says %d", name, got, err, want)
 		}
+
+		// One estimate per stream, in the order zfs send -nvP prints them.
+		var wantRows []string
+		for _, l := range lines(out) {
+			f := strings.Fields(l)
+			switch {
+			case len(f) == 3 && f[0] == "full":
+				wantRows = append(wantRows, f[1]+" "+f[2])
+			case len(f) == 4 && f[0] == "incremental":
+				wantRows = append(wantRows, f[2]+" "+f[3])
+			}
+		}
+		sizes, err := c.SendSizes(src+"@b", &o)
+		if err != nil {
+			t.Fatalf("%s: SendSizes: %v", name, err)
+		}
+		var gotRows []string
+		var sum uint64
+		for _, z := range sizes {
+			gotRows = append(gotRows, fmt.Sprintf("%s %d", z.To, z.Bytes))
+			sum += z.Bytes
+		}
+		if len(wantRows) == 0 || strings.Join(gotRows, "\n") != strings.Join(wantRows, "\n") || sum != got {
+			t.Errorf("%s: SendSizes\nzfs:\n%s\nhere:\n%s\n(sum %d, SendSize %d)", name, strings.Join(wantRows, "\n"), strings.Join(gotRows, "\n"), sum, got)
+		}
 	}
 }
 
@@ -1176,4 +1201,47 @@ func TestSendBackupLikeZfs(t *testing.T) {
 	zreceive(t, want, "-u", ref)
 	zreceive(t, got, "-u", mine)
 	sameTrees(t, "-Rb received", ref, mine)
+}
+
+// Evidence for the one documented difference: what zfs receive says and
+// leaves when the stream of a child lacks the child's base snapshot. Only
+// logs; the test that decides is TestReplicationHeaderCutDamagedAndReordered.
+func TestEvidenceChildWithoutItsBaseSnapshot(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "ev_src")
+	full := theirs(t, "-R", src+"@b")
+	head, subs, tail := splitStream(t, full)
+	idx := map[string]int{}
+	for i, p := range subs {
+		idx[p.ds[strings.LastIndexByte(p.ds, '/')+1:]+"@"+p.snap] = i
+	}
+	base := src[strings.LastIndexByte(src, '/')+1:]
+	join := func(order ...int) []byte {
+		out := append([]byte(nil), head...)
+		for _, i := range order {
+			out = append(out, subs[i].b...)
+		}
+		return append(out, tail...)
+	}
+	in := join(idx[base+"@a"], idx[base+"@b"], idx["kid@b"])
+	for _, verbose := range []bool{false, true} {
+		ref := wds(t, pool, "ev_ref")
+		args := []string{"receive", "-u"}
+		if verbose {
+			args = append(args, "-v")
+		}
+		cmd := exec.Command("zfs", append(args, ref)...)
+		cmd.Stdin = bytes.NewReader(in)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		t.Logf("zfs %v: exit %d, output %q, left %q", args, code, strings.TrimSpace(string(out)), strings.Fields(namesBelow(t, ref)))
+		exec.Command("zfs", "destroy", "-rR", ref).Run()
+	}
+	mine := wds(t, pool, "ev_mine")
+	_, err := c.Receive(context.Background(), bytes.NewReader(in), mine, &ReceiveOptions{NoMount: true})
+	t.Logf("here: %v, left %q", err, strings.Fields(namesBelow(t, mine)))
+	exec.Command("zfs", "destroy", "-rR", mine).Run()
 }

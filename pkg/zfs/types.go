@@ -180,6 +180,9 @@ var (
 // stream is before it is received.
 func ReadStreamHeader(r io.Reader) (*StreamHeader, error) { return primitives.ReadStreamHeader(r) }
 
+// StreamSize is the estimate for one stream of a send.
+type StreamSize = primitives.StreamSize
+
 // ParseResumeToken decodes a receive_resume_token.
 func ParseResumeToken(token string) (*ResumeToken, error) { return primitives.ParseResumeToken(token) }
 

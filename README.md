@@ -100,7 +100,7 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | `send`, `-i`, `-I` | `Snapshot.Send`, `SendFrom`, `SendIntermediates` |
 | `-R` `-p` `-h` `-b` `--skip-missing` | `Replicate`, `SendProps`, `SendHolds`, `SendBackup`, `SkipMissing` |
 | `-L` `-e` `-c` `-w` | `LargeBlocks`, `EmbeddedData`, `Compressed`, `Raw` |
-| `-n` | `Snapshot.SendSize` |
+| `-n` (`-v`, `-P`) | `Snapshot.SendSize`, `SendSizes` (one estimate per stream) |
 | `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
 | `receive`, `-F` `-s` `-c` | `Dataset.Receive`, `Force`, `Resumable`, `Heal` |
 | `-o prop=` `-o origin=` | property options, `WithOrigin` |
