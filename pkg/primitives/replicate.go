@@ -581,3 +581,30 @@ func (c *Client) sendPackage(ctx context.Context, snapshot string, w io.Writer, 
 	}
 	return nil
 }
+
+// sendPackageSize estimates a replication stream as zfs send -n does: the
+// sum of the estimates of its streams, without the header.
+func (c *Client) sendPackageSize(snapshot string, o *SendOptions) (uint64, error) {
+	r, err := c.newReplSend(snapshot, o)
+	if err != nil {
+		return 0, err
+	}
+	if err := r.gather(); err != nil {
+		return 0, err
+	}
+	steps, err := r.plan()
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, s := range steps {
+		step := *o
+		step.From, step.Intermediates, step.Replicate, step.Props, step.Holds = s.from, false, false, false, false
+		n, err := c.SendSize(s.to, &step)
+		if err != nil {
+			return 0, fmt.Errorf("zfs: send size %s: %w", s.to, err)
+		}
+		total += n
+	}
+	return total, nil
+}

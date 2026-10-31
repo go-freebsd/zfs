@@ -77,6 +77,7 @@ func (k *fakeKernel) write(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvl
 type setCall struct {
 	dataset string
 	props   *nvlist.List
+	cookie  uint64 // zc_cookie: set for "received" values
 }
 
 type inheritCall struct{ dataset, prop string }
@@ -211,7 +212,7 @@ func (k *fakeKernel) Do(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist
 		if _, ok := k.ds[name]; !ok {
 			return nil, k.fail(ioc, name, syscall.ENOENT)
 		}
-		k.sets = append(k.sets, setCall{name, in})
+		k.sets = append(k.sets, setCall{name, in, cmd.Cookie})
 		defer func() {
 			if k.after != nil {
 				k.after(writeCall{ioc: ioc, name: name, in: in})

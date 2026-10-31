@@ -150,6 +150,9 @@ func (c *Client) SendFD(snapshot string, fd int, o *SendOptions) error {
 // (zfs send -n). The flags of o change the answer: a compressed stream is
 // smaller.
 func (c *Client) SendSize(snapshot string, o *SendOptions) (uint64, error) {
+	if o != nil && (o.Replicate || o.Props || o.Holds || o.Intermediates) {
+		return c.sendPackageSize(snapshot, o)
+	}
 	in := nvlist.New()
 	if o != nil {
 		if o.From != "" {

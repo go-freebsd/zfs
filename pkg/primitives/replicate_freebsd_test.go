@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -444,5 +445,32 @@ func TestReceiveRawReplicationLikeZfs(t *testing.T) {
 	a, b := cryptFacts(t, ref), cryptFacts(t, mine)
 	if missing, extra := diff(a, b); len(missing) > 0 || len(extra) > 0 {
 		t.Errorf("encryption facts differ\nonly in zfs receive's copy: %q\nonly in ours: %q", missing, extra)
+	}
+}
+
+// The estimate of a replication stream is the one zfs send -nP prints.
+func TestSendReplicationSizeMatchesZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := replTree(t, c, pool, "rz_src")
+	for name, tc := range map[string]struct {
+		args []string
+		opts SendOptions
+	}{
+		"-R":  {[]string{"-R", src + "@b"}, SendOptions{Replicate: true}},
+		"-RI": {[]string{"-R", "-I", "@a", src + "@b"}, SendOptions{Replicate: true, Intermediates: true, From: "@a"}},
+		"-I":  {[]string{"-I", "@a", src + "@b"}, SendOptions{Intermediates: true, From: "@a"}},
+	} {
+		out := cli(t, "zfs", append([]string{"send", "-n", "-v", "-P"}, tc.args...)...)
+		var want uint64
+		for _, l := range lines(out) {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "size" {
+				want, _ = strconv.ParseUint(f[1], 10, 64)
+			}
+		}
+		o := tc.opts
+		got, err := c.SendSize(src+"@b", &o)
+		if err != nil || want == 0 || got != want {
+			t.Errorf("%s: SendSize = %d, %v; zfs send -nP says %d", name, got, err, want)
+		}
 	}
 }
