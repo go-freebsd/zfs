@@ -5,10 +5,10 @@ libzfs, no libzfs_core, no cgo. The sibling of
 [go-freebsd/jail](https://github.com/go-freebsd/jail).
 
 > **Status: work in progress.** Reading, properties, creating, snapshots,
-> clones, holds, bookmarks, destroy, rename, rollback, promote, encryption keys
-> and send/receive of single-snapshot streams work and are tested against a real
-> pool on FreeBSD 14.3 and 15.0. Mounting and replication streams (`send -R`/`-p`)
-> are next. Nothing here is released yet. Needs Go 1.23.
+> clones, holds, bookmarks, destroy, rename, rollback, promote, encryption keys,
+> mounting and send/receive of single-snapshot streams work and are tested against
+> a real pool on FreeBSD 14.3 and 15.0. Replication streams (`send -R`/`-p`) are
+> next. Nothing here is released yet. Needs Go 1.23.
 
 | Package | What it is |
 |---|---|
@@ -101,6 +101,9 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
 | `receive`, `-F` `-s` `-c` | `Dataset.Receive`, `Force`, `Resumable`, `Heal` |
 | `-o prop=` `-o origin=` | property options, `WithOrigin` |
+| `-x prop` | `Exclude` |
+| `-u` | `NoMount` |
+| `-n` | `DryRun` |
 | `-d` `-e`, `-A` | `DiscardPool`, `LastElement`, `Dataset.AbortResume` |
 
 Streams made here are byte for byte the streams `zfs send` makes, and the CI feeds them to
@@ -109,13 +112,54 @@ Streams made here are byte for byte the streams `zfs send` makes, and the CI fee
 several streams, which libzfs takes apart in userland. `Receive` refuses them with
 `ErrReplicationStream` and creates nothing; `SendIntermediates` writes the plain
 streams one after the other instead, which `Receive` and `zfs receive` both take.
-`-x` (exclude a property), `-u`, `-n`/`-v` of receive and mounting the result are not
-covered. `Heal` is passed to the kernel but is not tested against a corrupted pool.
+`Heal` is passed to the kernel but is not tested against a corrupted pool.
 
-Datasets are created but not mounted: the kernel only creates them. Context is
-accepted where a call can take many kernel round trips (listings, `SnapshotAll`);
-a single ioctl cannot be cancelled. One `SnapshotAll` call takes one snapshot per
-dataset, because that is what the kernel accepts.
+`Exclude` (`-x`) works the way libzfs does it: the property is inherited on the target
+instead of taking the stream's value. A plain stream carries no properties, so this
+changes something only for a target that already holds *received* values, from an earlier
+`zfs send -p` received with the CLI. A property set locally on the target, or one that does
+not apply to the kind of dataset, is left alone.
+
+`DryRun` (`-n`) reads the stream to its end and checks it the way `zfs receive -n` does
+(framing, name, a new filesystem on an existing target needs `Force` and no snapshots, a
+missing parent needs `Parents`, raw onto an unencrypted target), and also what the kernel
+would refuse: an incremental stream needs its base among the target's snapshots, and the
+snapshot must not exist yet. It creates, changes and mounts nothing, and `Received.Bytes`
+is the length of the stream. It does not verify data checksums (libzfs does not either) and
+does not predict failures only the kernel knows, such as a full pool or a target that was
+modified since the base (`ETXTBSY`).
+
+## Mounting
+
+The kernel only creates datasets; mounting is userland work in libzfs, and is done here
+the same way: `nmount(2)` with the options the properties imply, the mount table from
+`getfsstat(2)`, and libzfs's rules for what is mountable (mountpoint `none`/`legacy`,
+`canmount`, `jailed` outside a jail, redacted, encrypted without its key, a non-empty
+directory unless `overlay=on`). Like the CLI, the calls that make or move filesystems
+mount and unmount them:
+
+```go
+home, _ := tank.CreateFilesystem("home", zfs.WithMountpoint("/home")) // mounted
+quiet, _ := tank.CreateFilesystem("quiet", zfs.NoMount())             // zfs create -u
+
+where, mounted, _ := home.IsMounted()
+err = quiet.Mount()                          // zfs mount; ErrNotMountable, ErrBusy, ErrMountpointNotEmpty
+err = quiet.Unmount(zfs.ForceUnmount())      // zfs unmount -f
+err = tank.MountAll()                        // zfs mount -a, parents first
+err = tank.UnmountAll()                      // children first
+home.Set(zfs.WithMountpoint("/srv/home"))    // unmounts it and the children that inherit, mounts them at the new place
+home.Rename("tank/srv")                      // same for a rename
+err = home.Destroy(zfs.Recursive())          // unmounts first; a busy mount: ErrBusy and nothing is lost
+```
+
+`Create`, `Clone` and `Receive` mount what they made (not volumes, not `canmount=noauto|off`,
+not an encrypted dataset still waiting for its key); `NoMount` turns that off. `Destroy`, `Rename`
+and a change of `mountpoint` or `canmount` unmount the dataset and the children that inherit
+the mountpoint first, and mount again what was mounted; if something is busy the ones already
+unmounted are mounted again and the call fails, nothing is half done. `ForceUnmount` is `-f`.
+`Unmount(AndUnloadKey())` unloads the key of an encryption root. `Mount(WithMountKey(key))`
+loads it first. Needs root; without `/dev/zfs` or off FreeBSD the mounting calls fail with
+`errors.ErrUnsupported`. The pool's `readonly` property is not looked at.
 
 ## Low level
 
@@ -152,6 +196,7 @@ covered yet.
 | `RENAME`, `ROLLBACK`, `PROMOTE` | `Rename`, `Rollback`, `Promote` |
 | `SEND_NEW`, `SEND_SPACE`, `SEND_PROGRESS`, `RECV_NEW`, `REDACT` | `Send`, `SendFD`, `SendSize`, `SendProgress`, `Receive`, `ReceiveFD`, `Redact` |
 | `LOAD_KEY`, `UNLOAD_KEY`, `CHANGE_KEY` | `LoadKey`, `CheckKey`, `UnloadKey`, `ChangeKey`, `InheritKey` |
+| `nmount(2)`, `unmount(2)`, `getfsstat(2)` | `Mount`, `Unmount`, `Mounts`, `IsMounted`, `MountPoint`, `MountAll`, `UnmountAll` |
 | everything else | `ioctl.Conn.Call` / `Do` / `Ioctl` |
 
 ## Testing
