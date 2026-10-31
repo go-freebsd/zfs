@@ -1237,11 +1237,11 @@ func TestEvidenceChildWithoutItsBaseSnapshot(t *testing.T) {
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		}
-		t.Logf("zfs %v: exit %d, output %q, left %q", args, code, strings.TrimSpace(string(out)), strings.Fields(namesBelow(t, ref)))
+		t.Errorf("EVIDENCE (not a failure): "+"zfs %v: exit %d, output %q, left %q", args, code, strings.TrimSpace(string(out)), strings.Fields(namesBelow(t, ref)))
 		exec.Command("zfs", "destroy", "-rR", ref).Run()
 	}
 	mine := wds(t, pool, "ev_mine")
 	_, err := c.Receive(context.Background(), bytes.NewReader(in), mine, &ReceiveOptions{NoMount: true})
-	t.Logf("here: %v, left %q", err, strings.Fields(namesBelow(t, mine)))
+	t.Errorf("EVIDENCE (not a failure): "+"here: %v, left %q", err, strings.Fields(namesBelow(t, mine)))
 	exec.Command("zfs", "destroy", "-rR", mine).Run()
 }

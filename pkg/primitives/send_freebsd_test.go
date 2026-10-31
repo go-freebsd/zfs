@@ -766,7 +766,11 @@ func TestRedactedSendWithPropsAndHolds(t *testing.T) {
 		ref, mine := wds(t, pool, "rp_ref"), wds(t, pool, "rp_mine")
 		zreceive(t, want, "-u", ref)
 		zreceive(t, got, "-u", mine)
-		sameTrees(t, name, ref, mine)
+		// -b of a dataset that was never received lists nothing, so the trees
+		// have few facts; they must still be equal.
+		if a, b := treeState(t, ref), treeState(t, mine); strings.Join(a, "\n") != strings.Join(b, "\n") {
+			t.Errorf("%s: trees differ\nzfs:  %q\nhere: %q", name, a, b)
+		}
 		releaseAll(ref)
 		releaseAll(mine)
 		cli(t, "zfs", "destroy", "-rR", ref)
