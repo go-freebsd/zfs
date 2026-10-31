@@ -4,13 +4,14 @@ package primitives
 
 import (
 	"bytes"
+	"os/exec"
 	"testing"
 
 	"github.com/go-freebsd/nvlist/pkg/nvlist"
 	"github.com/go-freebsd/zfs/pkg/ioctl"
 )
 
-// tree makes src with a child, two snapshots on each and a clone, and returns
+// replTree makes src with a child, two snapshots on each and a clone, and returns
 // the names.
 func replTree(t *testing.T, c *Client, pool, name string) (src string) {
 	t.Helper()
@@ -34,6 +35,9 @@ func TestPackageHeaderOfRealStreams(t *testing.T) {
 	c, pool := testClient(t)
 	src := replTree(t, c, pool, "pkg_src")
 	cli(t, "zfs", "hold", "keep", src+"@a", src+"/kid@a")
+	t.Cleanup(func() { // a held snapshot cannot be destroyed with its dataset
+		exec.Command("zfs", "release", "keep", src+"@a", src+"/kid@a").Run()
+	})
 
 	for name, args := range map[string][]string{
 		"-R":    {"-R", src + "@b"},
