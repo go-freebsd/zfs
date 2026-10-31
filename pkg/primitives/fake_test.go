@@ -332,6 +332,9 @@ func (k *fakeKernel) Call(ioc ioctl.IOC, name string, in *nvlist.List) (*nvlist.
 	}
 	switch ioc {
 	case ioctl.IOCObjsetRecvdProps:
+		if _, ok := k.recvdProps[name]; !ok {
+			return nil, k.fail(ioc, name, syscall.ENOTSUP) // never received into
+		}
 		out := nvlist.New()
 		names := make([]string, 0)
 		for n := range k.recvdProps[name] {

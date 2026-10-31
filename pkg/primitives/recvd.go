@@ -1,6 +1,9 @@
 package primitives
 
 import (
+	"errors"
+	"syscall"
+
 	"github.com/go-freebsd/nvlist/pkg/nvlist"
 	"github.com/go-freebsd/zfs/pkg/ioctl"
 )
@@ -9,11 +12,16 @@ import (
 // receive (ZFS_IOC_OBJSET_RECVD_PROPS), whatever has been set on it since:
 // the values zfs get -s received shows. Their source is "$recvd".
 func (c *Client) receivedProps(name string) (map[string]Property, error) {
+	props := map[string]Property{}
 	out, err := c.c.Call(ioctl.IOCObjsetRecvdProps, name, nil)
+	if errors.Is(err, syscall.ENOTSUP) {
+		// Never received into: the kernel has no received values to give.
+		// libzfs then has no list and send -b lists nothing.
+		return props, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	props := map[string]Property{}
 	if out == nil {
 		return props, nil
 	}
