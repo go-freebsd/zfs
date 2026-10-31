@@ -777,3 +777,79 @@ func TestRedactedSendWithPropsAndHolds(t *testing.T) {
 		cli(t, "zfs", "destroy", "-rR", mine)
 	}
 }
+
+// A raw send of an encrypted dataset that was cut off and resumed stays raw
+// (the resumed stream is not decrypted), and ends as zfs send -t and zfs
+// receive -s make it.
+func TestRawSendResumesLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := wds(t, pool, "rr_src")
+	if err := c.Create(src, &CreateOptions{Key: PassphraseKey("correct horse battery"), Props: map[string]any{"mountpoint": "none", "compression": "off"}}); err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "zfs", "create", "-o", "mountpoint="+tdir(t), "-o", "recordsize=128k", src+"/data")
+	mp := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", src+"/data")
+	blob := make([]byte, 12<<20)
+	rand.Read(blob)
+	if err := os.WriteFile(filepath.Join(mp, "blob"), blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "zfs", "snapshot", src+"/data@a")
+	snapshot := src + "/data@a"
+	full := theirs(t, "-w", snapshot)
+	if len(full) < 12<<20 {
+		t.Fatalf("raw stream of %d bytes", len(full))
+	}
+	cut := len(full) / 3
+
+	ref, mine := wds(t, pool, "rr_ref"), wds(t, pool, "rr_mine")
+	cli(t, "zfs", "create", "-o", "mountpoint=none", ref)
+	cli(t, "zfs", "create", "-o", "mountpoint=none", mine)
+	refDst, mineDst := ref+"/data", mine+"/data"
+	cmd := exec.Command("zfs", "receive", "-s", "-u", refDst)
+	cmd.Stdin = bytes.NewReader(full[:cut])
+	if cmd.Run() == nil {
+		t.Fatal("zfs receive took a cut stream")
+	}
+	if _, err := c.Receive(context.Background(), bytes.NewReader(full[:cut]), mineDst, &ReceiveOptions{NoMount: true, Resumable: true}); err == nil {
+		t.Fatal("Receive took a cut stream")
+	}
+	refTok := strings.TrimSpace(cli(t, "zfs", "get", "-H", "-o", "value", "receive_resume_token", refDst))
+	mineTok, ok, err := c.ResumeToken(mineDst)
+	if err != nil || !ok || refTok == "-" {
+		t.Fatalf("tokens: zfs %q; here %q %v %v", refTok, mineTok, ok, err)
+	}
+	rt, err1 := ParseResumeToken(refTok)
+	mt, err2 := ParseResumeToken(mineTok)
+	if err1 != nil || err2 != nil || !rt.Raw || !mt.Raw || rt.Object != mt.Object || rt.Offset != mt.Offset {
+		t.Fatalf("tokens differ: %+v / %+v (%v %v)", rt, mt, err1, err2)
+	}
+
+	want := theirs(t, "-t", refTok)
+	var got bytes.Buffer
+	if err := c.ResumeSend(context.Background(), &got, mineTok, nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string][]byte{"zfs send -t": want, "ResumeSend": got.Bytes()} {
+		h, err := ParseStreamHeader(s)
+		if err != nil || h.Features&FeatureRaw == 0 {
+			t.Errorf("%s: the resumed stream is not raw: %+v %v", name, h, err)
+		}
+	}
+	if len(want) != got.Len() {
+		t.Errorf("resumed streams: zfs send -t %d bytes, ResumeSend %d", len(want), got.Len())
+	}
+	zreceive(t, want, "-s", "-u", refDst)
+	if _, err := c.Receive(context.Background(), bytes.NewReader(got.Bytes()), mineDst, &ReceiveOptions{NoMount: true, Resumable: true}); err != nil {
+		t.Fatal(err)
+	}
+	sameTrees(t, "resumed raw send", refDst, mineDst)
+	a, b := cryptFacts(t, refDst), cryptFacts(t, mineDst)
+	if missing, extra := diff(a, b); len(missing) > 0 || len(extra) > 0 || len(a) < 4 {
+		t.Errorf("encryption facts differ\nonly in zfs receive's copy: %q\nonly in ours: %q", missing, extra)
+	}
+	// Still encrypted and locked, not readable: raw.
+	if ks := cli(t, "zfs", "get", "-H", "-o", "value", "keystatus", mineDst); ks != "unavailable" {
+		t.Errorf("keystatus of the received copy = %q, want unavailable", ks)
+	}
+}

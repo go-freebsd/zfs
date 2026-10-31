@@ -99,6 +99,7 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 |---|---|
 | `send`, `-i`, `-I` | `Snapshot.Send`, `SendFrom`, `SendIntermediates` |
 | `-R` `-p` `-h` `-b` `--skip-missing` | `Replicate`, `SendProps`, `SendHolds`, `SendBackup`, `SkipMissing` |
+| `-D` | `SendDedup` (accepted and ignored, as in the CLI) |
 | `-L` `-e` `-c` `-w` | `LargeBlocks`, `EmbeddedData`, `Compressed`, `Raw` |
 | `-n` (`-v`, `-P`) | `Snapshot.SendSize`, `SendSizes` (one estimate per stream) |
 | `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
@@ -110,6 +111,8 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | `-d` `-e`, `-A` | `DiscardPool`, `LastElement`, `Dataset.AbortResume` |
 | `-k` | `SkipHolds` |
 | `zpool import -o readonly=on` | mounts get `ro`, a send takes no holds, writes fail with `ErrReadOnlyPool` |
+
+`-p`, `-h` and `-b` may start from a bookmark (`From: "#bm"`), as `zfs send -p -i #bm` does; `-R` and `-I` may not.
 
 Single-snapshot streams made here are byte for byte the streams `zfs send` makes, and the CI
 feeds them to `zfs receive` and the other way round.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"reflect"
@@ -723,5 +724,20 @@ func TestDatasetDestroySnapshotsPassesTheSpecAndTheFlags(t *testing.T) {
 	n := len(s.calls)
 	if _, err := d.DestroySnapshots("a", ForceUnmount()); !errors.Is(err, ErrInvalidOption) || len(s.calls) != n {
 		t.Errorf("ForceUnmount: %v", err)
+	}
+}
+
+func TestSendDedupChangesNothing(t *testing.T) {
+	a, b := &config{}, &config{}
+	SendDedup().apply(a)
+	if fmt.Sprintf("%+v", a.send) != fmt.Sprintf("%+v", b.send) {
+		t.Errorf("SendDedup changed the send options: %+v", a.send)
+	}
+	c, _ := newStub()
+	if _, err := c.Snapshot("tank/a@s1").SendSize(SendDedup()); err != nil {
+		t.Errorf("SendDedup is not accepted by a send: %v", err)
+	}
+	if err := c.Dataset("tank/a").Destroy(SendDedup()); !errors.Is(err, ErrInvalidOption) {
+		t.Errorf("SendDedup outside a send: %v", err)
 	}
 }

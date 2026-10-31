@@ -1207,3 +1207,90 @@ func TestSendBackupLikeZfs(t *testing.T) {
 	zreceive(t, got, "-u", mine)
 	sameTrees(t, "-Rb received", ref, mine)
 }
+
+// zfs send -p -i #bookmark snap: the header and the stream are those of the
+// CLI, and zfs receive takes ours onto a target that has the bookmark's
+// snapshot.
+func TestPropsSendFromABookmarkLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "bm_src")
+	cli(t, "zfs", "bookmark", src+"@a", src+"#bm")
+	base := theirs(t, "-p", src+"@a")
+	t.Cleanup(func() { releaseAll(src) })
+	for name, tc := range map[string]struct {
+		args []string
+		opts SendOptions
+	}{
+		"-p": {[]string{"-p", "-i", "#bm", src + "@b"}, SendOptions{Props: true, From: "#bm"}},
+		"-b": {[]string{"-b", "-i", "#bm", src + "@b"}, SendOptions{Backup: true, From: "#bm"}},
+		"-h": {[]string{"-h", "-i", "#bm", src + "@b"}, SendOptions{Holds: true, From: "#bm"}},
+	} {
+		want := theirs(t, tc.args...)
+		o := tc.opts
+		got := ours(t, c, src+"@b", &o)
+		ws, gs := shapeOf(t, want), shapeOf(t, got)
+		if ws.header != gs.header || strings.Join(ws.subs, "\n") != strings.Join(gs.subs, "\n") || len(want) != len(got) {
+			t.Errorf("%s: differs\nzfs:  %s %v (%d bytes)\nhere: %s %v (%d bytes)", name, ws.header, ws.subs, len(want), gs.header, gs.subs, len(got))
+		}
+		ref, mine := wds(t, pool, "bm_ref"), wds(t, pool, "bm_mine")
+		for _, d := range []string{ref, mine} {
+			zreceive(t, base, "-u", d)
+		}
+		zreceive(t, want, "-u", ref)
+		zreceive(t, got, "-u", mine)
+		if a, b := treeState(t, ref), treeState(t, mine); strings.Join(a, "\n") != strings.Join(b, "\n") {
+			t.Errorf("%s: trees differ\n%q\n%q", name, a, b)
+		}
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
+	}
+	// -R and -I refuse a bookmark in both.
+	if err := exec.Command("zfs", "send", "-R", "-i", "#bm", src+"@b").Run(); err == nil {
+		t.Error("zfs send -R -i #bm succeeded")
+	}
+	if err := c.Send(context.Background(), src+"@b", io.Discard, &SendOptions{Replicate: true, From: "#bm"}); !errors.Is(err, ErrIncompatibleOptions) {
+		t.Errorf("Send with Replicate from a bookmark: %v", err)
+	}
+}
+
+// receive -d and -e of a replication stream, full and then incremental (the
+// reconcile step uses the same name mapping), give the tree zfs receive makes.
+func TestReplicationReceiveDiscardPoolAndLastElementLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "ly_src")
+	parent := wds(t, pool, "ly_parent")
+	cli(t, "zfs", "create", "-o", "mountpoint=none", parent)
+	nested := parent + "/src" // the stream's path has two elements below the pool
+	cli(t, "zfs", "rename", src, nested)
+	// A snapshot only the second, incremental stream has.
+	cli(t, "zfs", "snapshot", "-r", nested+"@c")
+	t.Cleanup(func() { releaseAll(nested) })
+
+	for name, layout := range map[string]struct {
+		flag   string
+		layout Layout
+	}{"-d": {"-d", LayoutDiscardPool}, "-e": {"-e", LayoutLastElement}} {
+		ref, mine := wds(t, pool, "ly_ref"), wds(t, pool, "ly_mine")
+		for _, d := range []string{ref, mine} {
+			cli(t, "zfs", "create", "-o", "mountpoint=none", d)
+		}
+		base := theirs(t, "-R", nested+"@b")
+		zreceive(t, base, "-u", layout.flag, ref)
+		if _, err := c.Receive(context.Background(), bytes.NewReader(base), mine, &ReceiveOptions{NoMount: true, Layout: layout.layout}); err != nil {
+			t.Fatalf("%s: Receive: %v", name, err)
+		}
+		sameTrees(t, name+" full", ref, mine)
+
+		incr := theirs(t, "-R", "-I", "@b", nested+"@c")
+		zreceive(t, incr, "-u", layout.flag, ref)
+		if _, err := c.Receive(context.Background(), bytes.NewReader(incr), mine, &ReceiveOptions{NoMount: true, Layout: layout.layout}); err != nil {
+			t.Fatalf("%s: Receive of the incremental stream: %v", name, err)
+		}
+		sameTrees(t, name+" incremental", ref, mine)
+		if a := namesBelow(t, ref); !strings.Contains(a, "@c") {
+			t.Errorf("%s: the incremental stream did not arrive: %s", name, a)
+		}
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
+	}
+}

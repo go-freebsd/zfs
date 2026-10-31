@@ -72,3 +72,37 @@ func nvlistWith(name string, v any) *nvlist.List {
 	l.Add(name, v)
 	return l
 }
+
+// zfs send -p -i #bookmark snap: one stream, incremental from the bookmark,
+// with the header of a send without a base. Several streams cannot start
+// from a bookmark.
+func TestPropsSendFromABookmark(t *testing.T) {
+	k := newFake(t)
+	c := newClient(k)
+	r, err := c.newReplSend("tank/a@s3", &SendOptions{Props: true, From: "#bm1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.bookmark != "tank/a#bm1" || r.from != "" {
+		t.Fatalf("bookmark %q from %q", r.bookmark, r.from)
+	}
+	if err := r.gather(); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := r.plan()
+	if err != nil || len(steps) != 1 || steps[0].from != "tank/a#bm1" || steps[0].to != "tank/a@s3" {
+		t.Errorf("steps %+v, %v", steps, err)
+	}
+	for name, o := range map[string]*SendOptions{
+		"-R":  {Replicate: true, From: "#bm1"},
+		"-I":  {Intermediates: true, From: "#bm1"},
+		"-Rp": {Replicate: true, Props: true, From: "tank/a#bm1"},
+	} {
+		if _, err := c.newReplSend("tank/a@s3", o); !errors.Is(err, ErrIncompatibleOptions) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := c.newReplSend("tank/a@s3", &SendOptions{Props: true, From: "tank/z#bm1"}); err == nil {
+		t.Error("a bookmark of another dataset was accepted")
+	}
+}

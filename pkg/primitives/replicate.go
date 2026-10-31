@@ -49,6 +49,8 @@ type replSend struct {
 
 	recursive, doall, props, holds, backup, raw, skipMissing bool
 
+	bookmark string // the full name of the bookmark a single stream starts from
+
 	fss     *nvlist.List
 	entries []*fsEntry
 	bySnap  map[uint64]*fsEntry // fsavl: snapshot GUID -> dataset
@@ -97,11 +99,23 @@ func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error)
 		skipMissing: o.SkipMissing,
 		bySnap:      map[uint64]*fsEntry{},
 	}
-	if o.From != "" {
+	if strings.Contains(o.From, "#") {
+		// zfs send -p -i #bookmark snap: the header is that of a send without
+		// a base (send_prelim_records gets from=NULL) and the stream goes
+		// out incremental from the bookmark. Several streams cannot.
+		if o.Replicate || o.Intermediates {
+			return nil, fmt.Errorf("%w: multiple snapshots cannot be sent from a bookmark", ErrIncompatibleOptions)
+		}
+		from := expand(top, o.From)
+		if ds, _, ok := strings.Cut(from, "#"); !ok || ds != top {
+			return nil, fmt.Errorf("zfs: send: %s is not a bookmark of %s", from, top)
+		}
+		r.bookmark = from
+	} else if o.From != "" {
 		from := expand(top, o.From)
 		ds, short, ok := strings.Cut(from, "@")
-		if !ok || strings.Contains(from, "#") {
-			return nil, errors.New("zfs: send: a replication stream needs a snapshot to start from, not a bookmark")
+		if !ok {
+			return nil, errors.New("zfs: send: a replication stream needs a snapshot or a bookmark to start from")
 		}
 		if ds != top {
 			return nil, fmt.Errorf("zfs: send: %s is not a snapshot of %s", from, top)
@@ -363,7 +377,13 @@ func (r *replSend) plan() ([]sendStep, error) {
 		if len(r.entries) == 0 {
 			return nil, errors.New("zfs: send: nothing to send")
 		}
-		return r.planFS(r.entries[0])
+		steps, err := r.planFS(r.entries[0])
+		if err == nil && r.bookmark != "" {
+			for i := range steps {
+				steps[i].from = r.bookmark
+			}
+		}
+		return steps, err
 	}
 	r.cloneOrigins = map[uint64]bool{}
 	for _, e := range r.entries {

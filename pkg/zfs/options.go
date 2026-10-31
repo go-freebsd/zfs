@@ -266,6 +266,15 @@ func SendBackup() Option {
 	return Option{name: "SendBackup", scope: scSend, apply: func(c *config) { c.send.Backup = true }}
 }
 
+// SendDedup is accepted and ignored, as zfs send -D is: deduplicated streams
+// are no longer made. It exists so that command lines can be ported as they
+// are; the stream is the same with or without it.
+//
+// Deprecated: it has no effect.
+func SendDedup() Option {
+	return Option{name: "SendDedup", scope: scSend, apply: func(c *config) {}}
+}
+
 // SkipMissing skips descendants that lack the snapshot, with a warning,
 // instead of failing (zfs send --skip-missing). The warnings come back as an
 // error matching ErrSendIncomplete after the stream is written.
