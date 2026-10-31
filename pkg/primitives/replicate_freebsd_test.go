@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -473,4 +476,172 @@ func TestSendReplicationSizeMatchesZfs(t *testing.T) {
 			t.Errorf("%s: SendSize = %d, %v; zfs send -nP says %d", name, got, err, want)
 		}
 	}
+}
+
+// plainTree makes pool/<name> with a child, default mountpoints, a file in each
+// and snapshots @a and @b of both. It returns the filesystem.
+func plainTree(t *testing.T, pool, name string) string {
+	t.Helper()
+	src := wds(t, pool, name)
+	cli(t, "zfs", "create", src)
+	cli(t, "zfs", "create", src+"/kid")
+	for _, d := range []string{src, src + "/kid"} {
+		mp := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", d)
+		if err := os.WriteFile(filepath.Join(mp, "f"), []byte("data of "+d), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cli(t, "zfs", "snapshot", "-r", src+"@a")
+	cli(t, "zfs", "snapshot", "-r", src+"@b")
+	return src
+}
+
+// mounted lists "name mountpoint" of the mounted filesystems below root.
+func mountedBelow(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	for _, r := range rows(cli(t, "zfs", "list", "-r", "-H", "-t", "filesystem", "-o", "name,mounted,mountpoint", root)) {
+		if len(r) == 3 && r[1] == "yes" {
+			out = append(out, strings.ReplaceAll(r[0]+" "+r[2], root, "ROOT"))
+		}
+	}
+	return sorted(out)
+}
+
+// The real zfs(8) processes are connected to this library with pipes: no
+// buffer in between, a reader or writer that is a file and one that is not.
+func TestReplicationBetweenZfsProcessesAndThisLibrary(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "px_src")
+
+	// zfs send -R | Receive, the reader being the pipe's *os.File.
+	t.Run("zfs send to Receive", func(t *testing.T) {
+		for _, wrap := range []string{"file", "reader"} {
+			ref, mine := wds(t, pool, "px_ref"), wds(t, pool, "px_mine")
+			send := exec.Command("zfs", "send", "-R", src+"@b")
+			out, err := send.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			send.Stderr = &stderr
+			if err := send.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var in io.Reader = out
+			if wrap == "reader" {
+				in = io.MultiReader(out) // not an *os.File: copied through a pipe
+			}
+			got, rerr := c.Receive(context.Background(), in, mine, nil)
+			if err := send.Wait(); err != nil {
+				t.Fatalf("%s: zfs send: %v\n%s", wrap, err, stderr.String())
+			}
+			if rerr != nil || len(got) != 4 {
+				t.Fatalf("%s: Receive: %d streams, %v", wrap, len(got), rerr)
+			}
+			// The CLI does the same with the same stream.
+			zreceive(t, theirs(t, "-R", src+"@b"), ref)
+			sameTrees(t, wrap, ref, mine)
+			// Mounted like zfs receive mounts, with the data in place.
+			if a, b := mountedBelow(t, ref), mountedBelow(t, mine); strings.Join(a, "\n") != strings.Join(b, "\n") || len(b) != 2 {
+				t.Errorf("%s: mounted\nzfs receive: %q\nhere:        %q", wrap, a, b)
+			}
+			for _, d := range []string{"", "/kid"} {
+				mp := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", mine+d)
+				if body, err := os.ReadFile(filepath.Join(mp, "f")); err != nil || !strings.HasPrefix(string(body), "data of ") {
+					t.Errorf("%s: %s: %q, %v", wrap, mp, body, err)
+				}
+			}
+			cli(t, "zfs", "destroy", "-rR", ref)
+			cli(t, "zfs", "destroy", "-rR", mine)
+		}
+	})
+
+	// Send | zfs receive, the writer being the process's stdin.
+	t.Run("Send to zfs receive", func(t *testing.T) {
+		for _, wrap := range []string{"file", "writer"} {
+			dst := wds(t, pool, "px_dst")
+			recv := exec.Command("zfs", "receive", dst)
+			var stderr bytes.Buffer
+			recv.Stderr = &stderr
+			var w io.Writer
+			var closeW func() error
+			if wrap == "file" {
+				pr, pw, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				recv.Stdin, w, closeW = pr, pw, pw.Close
+				defer pr.Close()
+			} else {
+				in, err := recv.StdinPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				w, closeW = struct{ io.Writer }{in}, in.Close // not an *os.File
+			}
+			if err := recv.Start(); err != nil {
+				t.Fatal(err)
+			}
+			serr := c.Send(context.Background(), src+"@b", w, &SendOptions{Replicate: true})
+			closeW()
+			if err := recv.Wait(); err != nil || serr != nil {
+				t.Fatalf("%s: Send: %v; zfs receive: %v\n%s", wrap, serr, err, stderr.String())
+			}
+			for _, s := range []string{"@a", "@b", "/kid@a", "/kid@b"} {
+				if guid(t, dst+s) != guid(t, src+s) {
+					t.Errorf("%s: %s differs", wrap, s)
+				}
+			}
+			cli(t, "zfs", "destroy", "-rR", dst)
+		}
+	})
+
+	// The layouts of -d and -e, and -n, against the CLI.
+	t.Run("layouts and dry run", func(t *testing.T) {
+		stream := theirs(t, "-R", src+"@b")
+		for name, tc := range map[string]struct {
+			flag   string
+			layout Layout
+		}{"-d": {"-d", LayoutDiscardPool}, "-e": {"-e", LayoutLastElement}} {
+			ref, mine := wds(t, pool, "px_lref"), wds(t, pool, "px_lmine")
+			for _, p := range []string{ref, mine} {
+				cli(t, "zfs", "create", "-o", "mountpoint=none", p)
+			}
+			zreceive(t, stream, "-u", tc.flag, ref)
+			got, err := c.Receive(context.Background(), bytes.NewReader(stream), mine, &ReceiveOptions{Layout: tc.layout, NoMount: true})
+			if err != nil || len(got) != 4 {
+				t.Fatalf("%s: %d streams, %v", name, len(got), err)
+			}
+			a := sorted(lines(cli(t, "zfs", "list", "-r", "-H", "-t", "all", "-o", "name", ref)))
+			b := sorted(lines(cli(t, "zfs", "list", "-r", "-H", "-t", "all", "-o", "name", mine)))
+			na, nb := strings.ReplaceAll(strings.Join(a, "\n"), ref, "ROOT"), strings.ReplaceAll(strings.Join(b, "\n"), mine, "ROOT")
+			if na != nb || len(b) < 5 {
+				t.Errorf("%s: layouts differ\nzfs receive:\n%s\nhere:\n%s", name, na, nb)
+			}
+			cli(t, "zfs", "destroy", "-rR", ref)
+			cli(t, "zfs", "destroy", "-rR", mine)
+		}
+
+		// -n: nothing happens, the whole stream is read, the answer agrees with the CLI.
+		dry := wds(t, pool, "px_dry")
+		got, err := c.Receive(context.Background(), bytes.NewReader(stream), dry, &ReceiveOptions{DryRun: true})
+		if err != nil || len(got) != 4 {
+			t.Fatalf("dry run: %d streams, %v", len(got), err)
+		}
+		if ok, _ := c.Exists(dry); ok {
+			t.Error("a dry run created the target")
+		}
+		// A truncated stream fails the same way for both and leaves nothing half made but what libzfs leaves.
+		cut := stream[:len(stream)/2]
+		trunc := wds(t, pool, "px_cut")
+		if _, err := c.Receive(context.Background(), bytes.NewReader(cut), trunc, &ReceiveOptions{NoMount: true}); err == nil {
+			t.Error("a truncated replication stream was received without an error")
+		}
+		cmd := exec.Command("zfs", "receive", "-u", wds(t, pool, "px_cutref"))
+		cmd.Stdin = bytes.NewReader(cut)
+		if err := cmd.Run(); err == nil {
+			t.Error("zfs receive accepted the truncated stream")
+		}
+	})
 }
