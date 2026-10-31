@@ -520,11 +520,11 @@ func TestSetCanmount(t *testing.T) {
 	if len(m.table) != 0 {
 		t.Errorf("table = %v", m.table)
 	}
-	// on: mounted although it was not before
+	// on: stays unmounted, as with zfs set canmount=on
 	if err := c.SetProp("tank/a", "canmount", "on"); err != nil {
 		t.Fatal(err)
 	}
-	if m.table["tank/a"] != "/tank/a" {
+	if len(m.table) != 0 {
 		t.Errorf("table = %v", m.table)
 	}
 	// inherit goes the same way

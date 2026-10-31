@@ -127,12 +127,7 @@ func (cl *changelist) postfix() error {
 		if err != nil {
 			continue // destroyed or not there any more
 		}
-		want := n.mounted
-		if cl.prop == "canmount" && n.self {
-			if cm, _ := d.Enum("canmount"); cm == "on" {
-				want = true
-			}
-		}
+		want := n.mounted // what was mounted is mounted again, nothing else
 		if ks, _ := d.Enum("keystatus"); ks == "unavailable" {
 			continue
 		}

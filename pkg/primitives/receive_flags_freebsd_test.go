@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -223,6 +224,9 @@ func TestDryRunMatchesZfsReceiveN(t *testing.T) {
 	for name, stream := range streams {
 		t.Run(name, func(t *testing.T) {
 			dst := wds(t, pool, "n_dst")
+			if name == "incremental" || name == "all" {
+				zreceive(t, streams["full"], "-u", dst) // the base of the stream
+			}
 			r := bytes.NewReader(stream)
 			got, err := c.Receive(context.Background(), r, dst, &ReceiveOptions{DryRun: true})
 			if err != nil {
@@ -238,8 +242,13 @@ func TestDryRunMatchesZfsReceiveN(t *testing.T) {
 			if total != uint64(len(stream)) || r.Len() != 0 {
 				t.Errorf("read %d of %d bytes, %d left", total, len(stream), r.Len())
 			}
-			if ok, _ := c.Exists(dst); ok {
-				t.Error("a dry run created the dataset")
+			if ok, _ := c.Exists(dst + "@b"); ok {
+				t.Error("a dry run received the snapshot")
+			}
+			if name != "incremental" && name != "all" {
+				if ok, _ := c.Exists(dst); ok {
+					t.Error("a dry run created the dataset")
+				}
 			}
 			// zfs receive -n agrees
 			if name != "two streams" {
@@ -296,26 +305,34 @@ func TestDryRunMatchesZfsReceiveN(t *testing.T) {
 		}
 
 		// libzfs does not check the base of an incremental stream; the kernel does.
-		// The dry run says what the real receive says.
-		dst := wds(t, pool, "n_inc")
-		zreceive(t, full, "-u", dst)
-		cli(t, "zfs", "snapshot", dst+"@later") // the base is no longer the latest snapshot
-		_, dryErr := c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{DryRun: true})
-		_, realErr := c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{NoMount: true})
-		if dryErr == nil || realErr == nil || !errors.Is(dryErr, syscall.ENODEV) || !errors.Is(realErr, syscall.ENODEV) {
-			t.Errorf("not the latest snapshot: dry %v, real %v", dryErr, realErr)
+		// The dry run says what the real receive says. The base need not be the
+		// latest snapshot, only unmodified since.
+		fresh := func(name string) string {
+			dst := wds(t, pool, name)
+			zreceive(t, full, "-u", dst)
+			cli(t, "zfs", "snapshot", dst+"@later")
+			return dst
 		}
-		_, dryErr = c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{DryRun: true, Force: true})
-		_, realErr = c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{NoMount: true, Force: true})
-		if dryErr != nil || realErr != nil {
-			t.Errorf("with Force: dry %v, real %v", dryErr, realErr)
+		for _, force := range []bool{false, true} {
+			dst := fresh("n_inc_" + strconv.FormatBool(force))
+			_, dryErr := c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{DryRun: true, Force: force})
+			_, realErr := c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{NoMount: true, Force: force})
+			if dryErr != nil || realErr != nil {
+				t.Errorf("force=%v: base older than the latest snapshot: dry %v, real %v", force, dryErr, realErr)
+			}
+			// now @b exists
+			_, dryErr = c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{DryRun: true, Force: force})
+			_, realErr = c.Receive(context.Background(), bytes.NewReader(incr), dst, &ReceiveOptions{NoMount: true, Force: force})
+			if !errors.Is(dryErr, syscall.EEXIST) || !errors.Is(realErr, syscall.EEXIST) {
+				t.Errorf("force=%v: snapshot exists: dry %v, real %v", force, dryErr, realErr)
+			}
 		}
 		// a base that does not exist at all
 		other := wds(t, pool, "n_other")
 		zreceive(t, theirs(t, enc+"@a"), "-u", other)
-		_, dryErr = c.Receive(context.Background(), bytes.NewReader(incr), other, &ReceiveOptions{DryRun: true, Force: true})
-		_, realErr = c.Receive(context.Background(), bytes.NewReader(incr), other, &ReceiveOptions{NoMount: true, Force: true})
-		if dryErr == nil || realErr == nil {
+		_, dryErr := c.Receive(context.Background(), bytes.NewReader(incr), other, &ReceiveOptions{DryRun: true, Force: true})
+		_, realErr := c.Receive(context.Background(), bytes.NewReader(incr), other, &ReceiveOptions{NoMount: true, Force: true})
+		if !errors.Is(dryErr, syscall.ENODEV) || realErr == nil {
 			t.Errorf("unknown base: dry %v, real %v", dryErr, realErr)
 		}
 	})

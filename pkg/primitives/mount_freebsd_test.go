@@ -138,7 +138,8 @@ func TestMountRulesMatchZfsMount(t *testing.T) {
 		}, ErrMountpointNotEmpty},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ours, twin := wds(t, pool, "mr_"+strings.ReplaceAll(name, " ", "_")), wds(t, pool, "mr_twin_"+strings.ReplaceAll(name, " ", "_"))
+			id := strings.NewReplacer(" ", "_", ",", "").Replace(name)
+			ours, twin := wds(t, pool, "mr_"+id), wds(t, pool, "mr_twin_"+id)
 			dirA, dirB := tdir(t), tdir(t)
 			mk := func(ds, dir string, create func(props map[string]any)) {
 				props := map[string]any{"mountpoint": dir}

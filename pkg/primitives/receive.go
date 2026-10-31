@@ -333,6 +333,7 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 	defer closeSrc()
 
 	var got []Received
+	var prev *StreamHeader
 	for {
 		if err := ctx.Err(); err != nil {
 			return got, err
@@ -359,7 +360,8 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 		}
 		var rec Received
 		if o.DryRun {
-			rec, err = c.receiveDry(h, src, name, o)
+			rec, err = c.receiveDry(h, prev, src, name, o)
+			prev = h
 		} else {
 			rec, err = c.ReceiveFD(h, int(src.Fd()), name, o)
 		}

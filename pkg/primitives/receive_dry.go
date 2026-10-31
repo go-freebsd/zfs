@@ -10,12 +10,22 @@ import (
 
 // receiveDry is Receive with ReceiveOptions.DryRun: it makes the checks that
 // zfs receive -n makes and reads the stream to its end without receiving it.
-func (c *Client) receiveDry(h *StreamHeader, r io.Reader, snapshot string, o *ReceiveOptions) (Received, error) {
+//
+// prev is the stream before this one in the same input, if any: a stream that
+// continues it (its base is the snapshot prev makes) is not checked against
+// the target, which the dry run has not changed.
+func (c *Client) receiveDry(h, prev *StreamHeader, r io.Reader, snapshot string, o *ReceiveOptions) (Received, error) {
 	rec := Received{Header: h, Snapshot: snapshot, DryRun: true}
 	fail := func(err error) (Received, error) {
 		return rec, &ReceiveError{Received: rec, Err: err}
 	}
-	if err := c.dryRunChecks(h, snapshot, o); err != nil {
+	var err error
+	if prev != nil && h.FromGUID == prev.ToGUID {
+		err = c.dryRunPropChecks(h, snapshot, o)
+	} else {
+		err = c.dryRunChecks(h, snapshot, o)
+	}
+	if err != nil {
 		return fail(err)
 	}
 	n, err := skipStream(r, h, snapshot)
@@ -24,6 +34,36 @@ func (c *Client) receiveDry(h *StreamHeader, r io.Reader, snapshot string, o *Re
 		return fail(err)
 	}
 	return rec, nil
+}
+
+// dryRunPropChecks is the part of dryRunChecks that does not look at the
+// target.
+func (c *Client) dryRunPropChecks(h *StreamHeader, snapshot string, o *ReceiveOptions) error {
+	ds, _, _ := strings.Cut(snapshot, "@")
+	var target *Dataset
+	if ok, err := c.Exists(ds); err != nil {
+		return err
+	} else if ok {
+		var err error
+		if target, err = c.get(ds, false, nil); err != nil {
+			return err
+		}
+	}
+	return checkReceiveProps(h, o, target)
+}
+
+// checkReceiveProps checks the -o and -x settings the way a real receive
+// does before it calls the kernel.
+func checkReceiveProps(h *StreamHeader, o *ReceiveOptions, target *Dataset) error {
+	if _, err := excludeProps(h, o, target); err != nil {
+		return err
+	}
+	for _, k := range sortedKeys(o.Props) {
+		if _, err := convertProp(k, o.Props[k], false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dryRunChecks are the checks libzfs makes in zfs_receive_one before it
@@ -43,13 +83,13 @@ func (c *Client) dryRunChecks(h *StreamHeader, snapshot string, o *ReceiveOption
 			return err
 		}
 	}
-	if _, err := excludeProps(h, o, target); err != nil {
+	if err := checkReceiveProps(h, o, target); err != nil {
 		return err
 	}
-	for _, k := range sortedKeys(o.Props) {
-		if _, err := convertProp(k, o.Props[k], false); err != nil {
-			return err
-		}
+	if snapExists, err := c.Exists(snapshot); err != nil {
+		return err
+	} else if snapExists {
+		return no(syscall.EEXIST)
 	}
 
 	fromOrigin := h.FromGUID == 0 || h.Clone || o.Origin != ""
@@ -109,19 +149,14 @@ func (c *Client) dryRunChecks(h *StreamHeader, snapshot string, o *ReceiveOption
 		return no(syscall.EINVAL)
 	}
 	if !fromOrigin && !h.Resuming {
-		// The base must be a snapshot of the target, and the latest one
-		// unless the receive may roll back.
-		var latest *Dataset
+		// The base must be a snapshot of the target. It need not be the
+		// latest one: the kernel only insists that nothing was written since
+		// it (ETXTBSY, not predicted here) unless Force rolls back.
 		found := false
 		for _, s := range snaps {
-			if latest == nil || s.CreationTxg > latest.CreationTxg {
-				latest = s
-			}
-			if s.GUID == h.FromGUID {
-				found = true
-			}
+			found = found || s.GUID == h.FromGUID
 		}
-		if !found || (!o.Force && latest.GUID != h.FromGUID) {
+		if !found {
 			return no(syscall.ENODEV)
 		}
 	}

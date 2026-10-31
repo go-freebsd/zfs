@@ -178,8 +178,9 @@ func TestDryRunChecksTheTarget(t *testing.T) {
 		{"full onto one with snapshots", full, "tank/a", ReceiveOptions{Force: true}, syscall.EEXIST},
 		{"full onto a clone", full, "tank/clone", ReceiveOptions{Force: true}, syscall.EEXIST},
 		{"incremental from the latest", incr(2030, FeatureLZ4), "tank/a", ReceiveOptions{}, nil},
-		{"incremental from an older one", incr(2015, FeatureLZ4), "tank/a", ReceiveOptions{}, syscall.ENODEV},
+		{"incremental from an older one", incr(2015, FeatureLZ4), "tank/a", ReceiveOptions{}, nil},
 		{"incremental from an older one, Force", incr(2015, FeatureLZ4), "tank/a", ReceiveOptions{Force: true}, nil},
+		{"snapshot exists", fullStream(bo, "pool/src@s3", 2030, FeatureLZ4), "tank/a", ReceiveOptions{}, syscall.EEXIST},
 		{"incremental from unknown", incr(99999, FeatureLZ4), "tank/a", ReceiveOptions{Force: true}, syscall.ENODEV},
 		{"raw incremental onto unencrypted", incr(2030, FeatureRaw), "tank/a", ReceiveOptions{}, syscall.EINVAL},
 		{"snapshot target", full, "tank/new@mine", ReceiveOptions{}, nil},
@@ -415,3 +416,21 @@ func TestReceiveMountsWhatItMade(t *testing.T) {
 
 // the fake reads from the pipe; keep io imported for the dry run helper
 var _ = io.EOF
+
+func TestDryRunFollowsTheStreamsBeforeIt(t *testing.T) {
+	k := newFake(t)
+	c := newClient(k)
+	bo := binary.NativeEndian
+	// the second stream is based on the snapshot the first makes (guid 0xabcdef):
+	// tank/new does not exist, but would after the first
+	in := bytes.Join([][]byte{fullStream(bo, "pool/src@one", 0, FeatureLZ4), fullStream(bo, "pool/src@two", 0xabcdef, FeatureLZ4)}, nil)
+	got, err := c.Receive(context.Background(), bytes.NewReader(in), "tank/new", &ReceiveOptions{DryRun: true})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%v %v", got, err)
+	}
+	// a stream that does not continue the first is judged on its own
+	in = bytes.Join([][]byte{fullStream(bo, "pool/src@one", 0, FeatureLZ4), fullStream(bo, "pool/src@two", 12345, FeatureLZ4)}, nil)
+	if _, err := c.Receive(context.Background(), bytes.NewReader(in), "tank/new", &ReceiveOptions{DryRun: true}); !errors.Is(err, syscall.ENOENT) {
+		t.Errorf("err = %v", err)
+	}
+}
