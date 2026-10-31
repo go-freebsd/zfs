@@ -89,7 +89,7 @@ func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error)
 		c: c, o: o, top: top, to: to,
 		pool:        strings.SplitN(top, "/", 2)[0],
 		recursive:   o.Replicate,
-		doall:       o.Intermediates,
+		doall:       o.Intermediates || (o.Replicate && o.From == ""), // zfs send -R sends every snapshot
 		props:       o.Props,
 		holds:       o.Holds,
 		raw:         o.Raw,
@@ -465,17 +465,11 @@ func (r *replSend) planFS(e *fsEntry) ([]sendStep, error) {
 	return steps, nil
 }
 
-// features are the feature flags of the compound header (send_prelim_records).
+// features are the feature flags of the compound header. libzfs asks for
+// SA_SPILL only when the handle of the snapshot is a filesystem, which it never
+// is, so only the holds flag is ever set.
 func (r *replSend) features() (StreamFeature, error) {
 	var f StreamFeature
-	d, err := r.c.get(r.top, false, []string{"version"})
-	if err != nil {
-		return 0, err
-	}
-	// A filesystem of ZPL version 5 or later has system attributes.
-	if v, ok := d.Uint64("version"); d.Type == Filesystem && (!ok || v >= 5) {
-		f |= FeatureSASpill
-	}
 	if r.holds {
 		f |= FeatureHolds
 	}
