@@ -5,6 +5,8 @@ package primitives
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-freebsd/nvlist/pkg/nvlist"
 	"github.com/go-freebsd/zfs/pkg/ioctl"
@@ -656,4 +659,180 @@ func TestReplicationBetweenZfsProcessesAndThisLibrary(t *testing.T) {
 			t.Error("zfs receive accepted the truncated stream")
 		}
 	})
+}
+
+// bigTree is plainTree with 6 MiB of random data in the child, so that cutting
+// a stream in half lands inside a stream of a snapshot.
+func bigTree(t *testing.T, pool, name string) string {
+	t.Helper()
+	src := wds(t, pool, name)
+	cli(t, "zfs", "create", "-o", "mountpoint="+tdir(t), src)
+	cli(t, "zfs", "create", src+"/kid")
+	data := make([]byte, 6<<20)
+	rand.Read(data)
+	mp := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", src+"/kid")
+	if err := os.WriteFile(filepath.Join(mp, "big"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cli(t, "zfs", "snapshot", "-r", src+"@a")
+	cli(t, "zfs", "snapshot", "-r", src+"@b")
+	return src
+}
+
+func namesBelow(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("zfs", "list", "-r", "-H", "-t", "all", "-o", "name", root).Output()
+	if err != nil {
+		return "(absent)"
+	}
+	return strings.ReplaceAll(string(out), root, "ROOT")
+}
+
+// A sender that dies halfway: the receiver fails as zfs receive does and
+// leaves what zfs receive leaves.
+func TestReplicationSenderDiesHalfway(t *testing.T) {
+	c, pool := testClient(t)
+	src := bigTree(t, pool, "pd_src")
+	full := theirs(t, "-R", src+"@b")
+	for _, frac := range []int{2, 3} { // half and a third in
+		cut := len(full) / frac
+		// A real process produces the cut stream: head ends early and zfs send dies of SIGPIPE.
+		sh := exec.Command("sh", "-c", fmt.Sprintf("zfs send -R %s@b | head -c %d", src, cut))
+		out, err := sh.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sh.Start(); err != nil {
+			t.Fatal(err)
+		}
+		mine := wds(t, pool, "pd_mine")
+		_, rerr := c.Receive(context.Background(), io.MultiReader(out), mine, &ReceiveOptions{NoMount: true})
+		sh.Wait()
+		if rerr == nil {
+			t.Fatalf("1/%d: a stream cut off was received without an error", frac)
+		}
+		if !errors.Is(rerr, ioctl.ErrStreamTruncated) && !errors.Is(rerr, ErrNotAStream) && !errors.Is(rerr, ErrBadPackage) {
+			t.Logf("1/%d: error is %v", frac, rerr)
+		}
+		ref := wds(t, pool, "pd_ref")
+		cmd := exec.Command("zfs", "receive", "-u", ref)
+		cmd.Stdin = bytes.NewReader(full[:cut])
+		if cmd.Run() == nil {
+			t.Fatalf("1/%d: zfs receive accepted the cut stream", frac)
+		}
+		if a, b := namesBelow(t, ref), namesBelow(t, mine); a != b {
+			t.Errorf("1/%d: what is left differs\nzfs receive:\n%s\nhere:\n%s", frac, a, b)
+		}
+		t.Logf("1/%d: error %v; left: %q", frac, rerr, strings.Fields(namesBelow(t, mine)))
+		exec.Command("zfs", "destroy", "-rR", ref).Run()
+		exec.Command("zfs", "destroy", "-rR", mine).Run()
+	}
+}
+
+// Cancelling stops a receive that waits for a sender that went silent, and a
+// send into a writer nobody reads; the holds taken for the send are released.
+func TestReplicationCancel(t *testing.T) {
+	c, pool := testClient(t)
+	src := bigTree(t, pool, "pc_src")
+	full := theirs(t, "-R", src+"@b")
+
+	t.Run("receive", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		go func() { pw.Write(full[:len(full)/2]) }() // then silence: the pipe stays open
+		defer pw.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		mine := wds(t, pool, "pc_mine")
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.Receive(ctx, pr, mine, &ReceiveOptions{NoMount: true})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("error = %v, want the context's", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("Receive did not return after its context ended")
+		}
+	})
+
+	t.Run("send", func(t *testing.T) {
+		pr, pw := io.Pipe() // nobody reads
+		defer pr.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- c.Send(ctx, src+"@b", pw, &SendOptions{Replicate: true}) }()
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want context.Canceled", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("Send did not return after its context was cancelled")
+		}
+		if h := holdRows(src); len(h) != 0 {
+			t.Errorf("holds left behind by the cancelled send: %v", h)
+		}
+		// And the tree is not damaged: it can be sent again.
+		if got := ours(t, c, src+"@b", &SendOptions{Replicate: true}); len(got) != len(full) {
+			t.Errorf("a later send is %d bytes, zfs send made %d", len(got), len(full))
+		}
+	})
+}
+
+// A target that was changed since the base snapshot refuses an incremental
+// replication stream, and takes it with Force by rolling back: the same for
+// zfs receive and for this library, with the stream coming from a process.
+func TestReplicationForceOnADivergedTarget(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "pf_src")
+	cli(t, "zfs", "destroy", "-r", src+"@b")
+	base := theirs(t, "-R", src+"@a")
+	cli(t, "zfs", "snapshot", "-r", src+"@b")
+
+	for _, force := range []bool{false, true} {
+		ref, mine := wds(t, pool, "pf_ref"), wds(t, pool, "pf_mine")
+		for _, d := range []string{ref, mine} {
+			zreceive(t, base, "-u", d)
+			cli(t, "zfs", "snapshot", d+"@local") // newer than the base: the target diverged
+		}
+		args := []string{"-u"}
+		if force {
+			args = append(args, "-F")
+		}
+		cmd := exec.Command("zfs", append([]string{"receive"}, append(args, ref)...)...)
+		send := exec.Command("zfs", "send", "-R", "-i", "@a", src+"@b")
+		pipe, _ := send.StdoutPipe()
+		cmd.Stdin = pipe
+		send.Start()
+		refErr := cmd.Run()
+		send.Wait()
+
+		send2 := exec.Command("zfs", "send", "-R", "-i", "@a", src+"@b")
+		out, _ := send2.StdoutPipe()
+		send2.Start()
+		_, mineErr := c.Receive(context.Background(), out, mine, &ReceiveOptions{NoMount: true, Force: force})
+		send2.Wait()
+
+		if (refErr == nil) != (mineErr == nil) {
+			t.Errorf("force=%v: zfs receive: %v; here: %v", force, refErr, mineErr)
+		}
+		if a, b := namesBelow(t, ref), namesBelow(t, mine); a != b {
+			t.Errorf("force=%v: trees differ\nzfs receive:\n%s\nhere:\n%s", force, a, b)
+		}
+		hasLocal := strings.Contains(namesBelow(t, mine), "@local")
+		if force && (hasLocal || mineErr != nil) {
+			t.Errorf("force: the local snapshot survived (%v) or the receive failed: %v", hasLocal, mineErr)
+		}
+		if !force && mineErr == nil {
+			t.Error("without force: a diverged target accepted the stream")
+		}
+		releaseAll(ref)
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
+	}
 }
