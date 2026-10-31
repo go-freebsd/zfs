@@ -209,7 +209,9 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 		// The dry run first.
 		dry := exec.Command("zfs", append(append([]string{}, args...), "-n", "-p", ref+"@"+k.spec)...)
 		dryOut, dryErr := dry.CombinedOutput()
-		plan, planErr := c.PlanDestroySnapshots(mine, k.spec, k.recursive, k.deferred)
+		// The dry run asks about the very tree the CLI is asked about: the sizes
+		// depend on the data, which differs between two random trees.
+		plan, planErr := c.PlanDestroySnapshots(ref, k.spec, k.recursive, k.deferred)
 		if (dryErr == nil) != (planErr == nil) {
 			t.Errorf("%s: zfs destroy -np: %v %q; plan: %v", label, dryErr, dryOut, planErr)
 		}
@@ -227,7 +229,7 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 			}
 			var got []string
 			for _, s := range plan.Snapshots {
-				got = append(got, strings.ReplaceAll(s, mine, "ROOT"))
+				got = append(got, strings.ReplaceAll(s, ref, "ROOT"))
 			}
 			sort.Strings(want)
 			sort.Strings(got)
@@ -252,5 +254,37 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 			releaseAll(r)
 			exec.Command("zfs", "destroy", "-rR", r).Run()
 		}
+	}
+}
+
+// snapshot -o: user properties are set on the new snapshots, anything else is
+// refused, by the CLI and here alike (the kernel takes only user properties).
+func TestSnapshotPropertiesLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	ref, mine := wds(t, pool, "so_ref"), wds(t, pool, "so_mine")
+	for _, d := range []string{ref, mine} {
+		cli(t, "zfs", "create", "-o", "mountpoint=none", d)
+	}
+	if err := exec.Command("zfs", "snapshot", "-o", "repl:note=hi", "-o", "repl:n2=two", ref+"@a").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Snapshot([]string{mine + "@a"}, map[string]any{"repl:note": "hi", "repl:n2": "two"}); err != nil {
+		t.Fatal(err)
+	}
+	get := func(d string) string {
+		return strings.ReplaceAll(cli(t, "zfs", "get", "-H", "-o", "property,value,source", "-s", "local", "all", d+"@a"), d, "ROOT")
+	}
+	if a, b := get(ref), get(mine); a != b || !strings.Contains(a, "repl:note") {
+		t.Errorf("properties differ\nzfs:\n%s\nhere:\n%s", a, b)
+	}
+	for _, bad := range []string{"compression", "readonly", "used"} {
+		refErr := exec.Command("zfs", "snapshot", "-o", bad+"=on", ref+"@b").Run()
+		mineErr := c.Snapshot([]string{mine + "@b"}, map[string]any{bad: "on"})
+		if (refErr == nil) != (mineErr == nil) || refErr == nil {
+			t.Errorf("-o %s=on: zfs snapshot: %v; here: %v", bad, refErr, mineErr)
+		}
+	}
+	if a, b := snapsBelow(t, ref), snapsBelow(t, mine); a != b {
+		t.Errorf("snapshots differ: %q / %q", a, b)
 	}
 }
