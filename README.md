@@ -203,8 +203,9 @@ error does not stop the rest (they come back together as a `*BatchError`).
 fs@a%c`: a name, a range (`a%c`, `%c`, `a%`, `%`) or a comma separated list, ordered by
 creation, all or none. `PlanDestroySnapshots` is the dry run (`zfs destroy -nvp`): the
 snapshots and the space they free. As in the CLI, names that do not exist are skipped and an
-empty result is `ErrNotFound`; a snapshot with clones is `ErrBusy` unless `Deferred()`. Not
-done: `-R` (destroying the clones too).
+empty result is `ErrNotFound`; a snapshot with clones is `ErrBusy` (a `*DependentsError`) unless `Deferred()`. With
+`Clones()` (`-R`) the clones of the snapshots are destroyed first, at once even if the
+snapshots are deferred.
 
 ## Diff
 

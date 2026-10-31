@@ -162,12 +162,12 @@ func (s *stub) Diff(ctx context.Context, from, to string) iter.Seq2[primitives.D
 	}
 }
 
-func (s *stub) PlanDestroySnapshots(dataset, spec string, recursive, deferred bool) (*primitives.DestroyPlan, error) {
-	return &primitives.DestroyPlan{Snapshots: []string{dataset + "@x"}, Reclaim: 5}, s.rec("PlanDestroySnapshots", dataset, "@", spec, fmt.Sprint(recursive, deferred))
+func (s *stub) PlanDestroySnapshots(dataset, spec string, recursive, deferred, clones bool) (*primitives.DestroyPlan, error) {
+	return &primitives.DestroyPlan{Snapshots: []string{dataset + "@x"}, Reclaim: 5}, s.rec("PlanDestroySnapshots", dataset, "@", spec, fmt.Sprint(recursive, deferred, clones))
 }
 
-func (s *stub) DestroySnapshotSpec(dataset, spec string, recursive, deferred bool) ([]string, error) {
-	return []string{dataset + "@x"}, s.rec("DestroySnapshotSpec", dataset, "@", spec, fmt.Sprint(recursive, deferred))
+func (s *stub) DestroySnapshotSpec(dataset, spec string, recursive, deferred, clones bool) ([]string, error) {
+	return []string{dataset + "@x"}, s.rec("DestroySnapshotSpec", dataset, "@", spec, fmt.Sprint(recursive, deferred, clones))
 }
 
 func (s *stub) PlanDestroy(name string, opts *primitives.DestroyOptions) (*primitives.DestroyPlan, error) {

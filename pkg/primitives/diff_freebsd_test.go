@@ -189,20 +189,28 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 		spec      string
 		recursive bool
 		deferred  bool
+		clones    bool
 	}
 	cases := []tc{
-		{"s5", false, false}, {"s3%s5", false, false}, {"%s1", false, false}, {"s5%", false, false},
-		{"s3,s5", false, false}, {"s1%s1,s5", false, false}, {"s9", false, false}, {"s4%s9", false, false},
-		{"s3%s4", true, false}, {"s4", true, false}, {"%", true, true}, {"s2", false, false}, {"s2", false, true},
-		{"%s3", true, false}, {"%s3", true, true}, {"s4%s2", false, false},
+		{"s5", false, false, false}, {"s3%s5", false, false, false}, {"%s1", false, false, false}, {"s5%", false, false, false},
+		{"s3,s5", false, false, false}, {"s1%s1,s5", false, false, false}, {"s9", false, false, false}, {"s4%s9", false, false, false},
+		{"s3%s4", true, false, false}, {"s4", true, false, false}, {"%", true, true, false}, {"s2", false, false, false}, {"s2", false, true, false},
+		{"%s3", true, false, false}, {"%s3", true, true, false}, {"s4%s2", false, false, false},
+	}
+	// -R: the clone of s2 goes first.
+	for _, k := range []tc{{"s2", false, false, true}, {"s2%s3", false, false, true}, {"%s3", true, false, true}, {"%s3", true, true, true}, {"s4", false, false, true}, {"s2", false, true, true}} {
+		cases = append(cases, k)
 	}
 	for i, k := range cases {
-		label := fmt.Sprintf("%s r=%v d=%v", k.spec, k.recursive, k.deferred)
+		label := fmt.Sprintf("%s r=%v d=%v R=%v", k.spec, k.recursive, k.deferred, k.clones)
+		recursive := k.recursive || k.clones // -R is recursive too
 		ref := snapTree(t, c, pool, fmt.Sprintf("sd_ref%d", i))
 		mine := snapTree(t, c, pool, fmt.Sprintf("sd_mine%d", i))
 
 		args := []string{"destroy"}
-		if k.recursive {
+		if k.clones {
+			args = append(args, "-R")
+		} else if k.recursive {
 			args = append(args, "-r")
 		}
 		if k.deferred {
@@ -213,7 +221,7 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 		dryOut, dryErr := dry.CombinedOutput()
 		// The dry run asks about the very tree the CLI is asked about: the sizes
 		// depend on the data, which differs between two random trees.
-		plan, planErr := c.PlanDestroySnapshots(ref, k.spec, k.recursive, k.deferred)
+		plan, planErr := c.PlanDestroySnapshots(ref, k.spec, recursive, k.deferred, k.clones)
 		if (dryErr == nil) != (planErr == nil) {
 			t.Errorf("%s: zfs destroy -np: %v %q; plan: %v", label, dryErr, dryOut, planErr)
 		}
@@ -244,12 +252,17 @@ func TestDestroySnapshotSpecLikeZfs(t *testing.T) {
 		}
 
 		refErr := exec.Command("zfs", append(append([]string{}, args...), ref+"@"+k.spec)...).Run()
-		_, mineErr := c.DestroySnapshotSpec(mine, k.spec, k.recursive, k.deferred)
+		_, mineErr := c.DestroySnapshotSpec(mine, k.spec, recursive, k.deferred, k.clones)
 		if (refErr == nil) != (mineErr == nil) {
 			t.Errorf("%s: zfs destroy: %v; here: %v", label, refErr, mineErr)
 		}
 		if a, b := snapsBelow(t, ref), snapsBelow(t, mine); a != b {
 			t.Errorf("%s: what is left differs\nzfs destroy:\n%s\nhere:\n%s", label, a, b)
+		}
+		// The clone of s2 is outside the tree: -R takes it along.
+		alive := func(n string) bool { return exec.Command("zfs", "list", "-H", "-o", "name", n).Run() == nil }
+		if a, b := alive(ref+"_clone"), alive(mine+"_clone"); a != b {
+			t.Errorf("%s: the clone exists after zfs destroy: %v, after here: %v", label, a, b)
 		}
 		t.Logf("%s: zfs destroy %v, here %v", label, refErr, mineErr)
 		for _, r := range []string{ref, mine} {

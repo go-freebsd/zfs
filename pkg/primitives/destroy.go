@@ -212,9 +212,13 @@ func (c *Client) Destroy(name string, opts *DestroyOptions) error {
 	}
 	switch {
 	case strings.Contains(name, "@"):
+		ds, spec, _ := strings.Cut(name, "@")
 		if opts.DryRun {
-			ds, snap, _ := strings.Cut(name, "@")
-			_, err := c.PlanDestroySnapshots(ds, snap, false, opts.Defer)
+			_, err := c.PlanDestroySnapshots(ds, spec, opts.Recursive || opts.Clones, opts.Defer, opts.Clones)
+			return err
+		}
+		if opts.Clones || opts.Recursive || strings.ContainsAny(spec, "%,") {
+			_, err := c.DestroySnapshotSpec(ds, spec, opts.Recursive || opts.Clones, opts.Defer, opts.Clones)
 			return err
 		}
 		return c.DestroySnapshots([]string{name}, opts.Defer)

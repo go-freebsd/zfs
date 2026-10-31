@@ -714,10 +714,10 @@ func TestDatasetDestroySnapshotsPassesTheSpecAndTheFlags(t *testing.T) {
 	c, s := newStub()
 	d := c.Dataset("tank/a")
 	names, err := d.DestroySnapshots("a%c", Recursive(), Deferred())
-	if err != nil || len(names) != 1 || s.last() != "DestroySnapshotSpec tank/a@a%ctrue true" {
+	if err != nil || len(names) != 1 || s.last() != "DestroySnapshotSpec tank/a@a%ctrue true false" {
 		t.Fatalf("%v %v %q", names, err, s.last())
 	}
-	if _, err := d.PlanDestroySnapshots("%"); err != nil || s.last() != "PlanDestroySnapshots tank/a@%false false" {
+	if _, err := d.PlanDestroySnapshots("%"); err != nil || s.last() != "PlanDestroySnapshots tank/a@%false false false" {
 		t.Errorf("%v %q", err, s.last())
 	}
 	// Options of other operations are refused before anything is sent.

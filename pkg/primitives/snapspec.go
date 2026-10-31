@@ -2,7 +2,6 @@ package primitives
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"syscall"
 )
@@ -79,18 +78,27 @@ func shortOf(snapshot string) string {
 // documentation of destroy): "a%c", "%c", "a%", "%", "a,b%d". With
 // recursive the same specification is applied to every descendant that has
 // such snapshots. Names that are missing are skipped; if nothing is left the
-// error wraps ENOENT. A snapshot with clones is refused with EBUSY unless
-// deferred, as zfs destroy refuses it.
-func (c *Client) PlanDestroySnapshots(dataset, spec string, recursive, deferred bool) (*DestroyPlan, error) {
+// error wraps ENOENT. A snapshot with clones is refused with a
+// *DependentsError (EBUSY) unless deferred or unless clones is set, which
+// destroys what depends on the snapshots first (zfs destroy -R; Order of the
+// plan lists it).
+func (c *Client) PlanDestroySnapshots(dataset, spec string, recursive, deferred, clones bool) (*DestroyPlan, error) {
+	plan, _, err := c.planSnapshots(dataset, spec, recursive, deferred, clones)
+	return plan, err
+}
+
+// planSnapshots is PlanDestroySnapshots and also returns the dependents to
+// destroy first (Clones), as the steps of destroyItems.
+func (c *Client) planSnapshots(dataset, spec string, recursive, deferred, clones bool) (*DestroyPlan, []destroyItem, error) {
 	if dataset == "" || strings.ContainsAny(dataset, "@#") || spec == "" {
-		return nil, fmt.Errorf("zfs: destroy snapshots: need a dataset and a specification, got %q @ %q", dataset, spec)
+		return nil, nil, fmt.Errorf("zfs: destroy snapshots: need a dataset and a specification, got %q @ %q", dataset, spec)
 	}
 	root, err := c.get(dataset, false, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if root.Type != Filesystem && root.Type != Volume {
-		return nil, fmt.Errorf("zfs: destroy snapshots: %s is not a filesystem or volume", dataset)
+		return nil, nil, fmt.Errorf("zfs: destroy snapshots: %s is not a filesystem or volume", dataset)
 	}
 	datasets := []string{dataset}
 	if recursive {
@@ -101,15 +109,17 @@ func (c *Client) PlanDestroySnapshots(dataset, spec string, recursive, deferred 
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	plan := &DestroyPlan{}
+	var deps []destroyItem
+	seen := map[string]bool{}
 	for _, ds := range datasets {
 		all, err := c.snapshotsOf(ds)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		names := make([]string, len(all))
 		for i, s := range all {
@@ -129,14 +139,26 @@ func (c *Client) PlanDestroySnapshots(dataset, spec string, recursive, deferred 
 		for i, s := range all {
 			if !picked[names[i]] {
 				if err := flush(); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				continue
 			}
-			if !deferred {
-				if clones := s.Clones(); len(clones) > 0 {
-					sort.Strings(clones)
-					return nil, fmt.Errorf("zfs: cannot destroy %q: snapshot has dependent clones (%s): %w", s.Name, strings.Join(clones, ", "), syscall.EBUSY)
+			if clones {
+				// zfs destroy -R: what depends on the snapshot goes first, and
+				// clones are not deferred (only snapshots can be).
+				ds, err := c.dependents(s, false)
+				if err != nil {
+					return nil, nil, err
+				}
+				for _, d := range ds {
+					if !seen[d.Name] {
+						seen[d.Name] = true
+						deps = append(deps, destroyItem{d, false})
+					}
+				}
+			} else if !deferred {
+				if cl := s.Clones(); len(cl) > 0 {
+					return nil, nil, &DependentsError{Target: s.Name, Clones: cl}
 				}
 			}
 			if range0 == "" {
@@ -146,21 +168,34 @@ func (c *Client) PlanDestroySnapshots(dataset, spec string, recursive, deferred 
 			plan.Snapshots = append(plan.Snapshots, s.Name)
 		}
 		if err := flush(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if len(plan.Snapshots) == 0 {
-		return nil, fmt.Errorf("zfs: could not find any snapshots to destroy; check snapshot names: %w", syscall.ENOENT)
+		return nil, nil, fmt.Errorf("zfs: could not find any snapshots to destroy; check snapshot names: %w", syscall.ENOENT)
 	}
-	return plan, nil
+	for _, it := range deps {
+		plan.Order = append(plan.Order, it.d.Name)
+		if it.d.Type != Snapshot {
+			plan.Datasets = append(plan.Datasets, it.d.Name)
+		}
+	}
+	plan.Order = append(plan.Order, plan.Snapshots...)
+	return plan, deps, nil
 }
 
 // DestroySnapshotSpec destroys what PlanDestroySnapshots names, all or none
 // (zfs destroy dataset@spec). It returns the names destroyed.
-func (c *Client) DestroySnapshotSpec(dataset, spec string, recursive, deferred bool) ([]string, error) {
-	plan, err := c.PlanDestroySnapshots(dataset, spec, recursive, deferred)
+func (c *Client) DestroySnapshotSpec(dataset, spec string, recursive, deferred, clones bool) ([]string, error) {
+	plan, deps, err := c.planSnapshots(dataset, spec, recursive, deferred, clones)
 	if err != nil {
 		return nil, err
+	}
+	if len(deps) > 0 {
+		// The dependents first: a clone has to go before its origin.
+		if err := c.destroyItems(dataset, deps, &DestroyOptions{Recursive: true, Clones: true}); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.DestroySnapshots(plan.Snapshots, deferred); err != nil {
 		return nil, err
