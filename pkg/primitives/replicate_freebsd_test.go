@@ -1012,10 +1012,15 @@ func TestReplicationHeaderCutDamagedAndReordered(t *testing.T) {
 			if (refErr == nil) != (mineErr == nil) || ref != mine {
 				if name == knownDifference {
 					// zfs receive answers success and leaves the dataset out
-					// when the stream of a child lacks its base snapshot; this
-					// library reports the missing dataset as an error. The
-					// libzfs source gives no rule for the success, so the
-					// difference is documented in the README, not copied.
+					// when the stream of a child lacks its base snapshot, but
+					// only because the test sender and receiver share a pool:
+					// libzfs finds the base snapshot by GUID on the *sender's*
+					// dataset, resolves the destination to it ("receiving
+					// incremental stream of src/kid@b into src/kid@b") and
+					// ignores the snapshot that already exists there. With a
+					// receiving pool of its own it fails with "destination
+					// does not exist", as this library does, so the library
+					// does not copy it (receiving into the sender's dataset).
 					t.Logf("known difference, %s: zfs receive: %v, left %q\n  here: %v, left %q", name, refErr, ref, mineErr, mine)
 					continue
 				}
@@ -1201,47 +1206,4 @@ func TestSendBackupLikeZfs(t *testing.T) {
 	zreceive(t, want, "-u", ref)
 	zreceive(t, got, "-u", mine)
 	sameTrees(t, "-Rb received", ref, mine)
-}
-
-// Evidence for the one documented difference: what zfs receive says and
-// leaves when the stream of a child lacks the child's base snapshot. Only
-// logs; the test that decides is TestReplicationHeaderCutDamagedAndReordered.
-func TestEvidenceChildWithoutItsBaseSnapshot(t *testing.T) {
-	c, pool := testClient(t)
-	src := plainTree(t, pool, "ev_src")
-	full := theirs(t, "-R", src+"@b")
-	head, subs, tail := splitStream(t, full)
-	idx := map[string]int{}
-	for i, p := range subs {
-		idx[p.ds[strings.LastIndexByte(p.ds, '/')+1:]+"@"+p.snap] = i
-	}
-	base := src[strings.LastIndexByte(src, '/')+1:]
-	join := func(order ...int) []byte {
-		out := append([]byte(nil), head...)
-		for _, i := range order {
-			out = append(out, subs[i].b...)
-		}
-		return append(out, tail...)
-	}
-	in := join(idx[base+"@a"], idx[base+"@b"], idx["kid@b"])
-	for _, verbose := range []bool{false, true} {
-		ref := wds(t, pool, "ev_ref")
-		args := []string{"receive", "-u"}
-		if verbose {
-			args = append(args, "-v")
-		}
-		cmd := exec.Command("zfs", append(args, ref)...)
-		cmd.Stdin = bytes.NewReader(in)
-		out, err := cmd.CombinedOutput()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		}
-		t.Errorf("EVIDENCE (not a failure): "+"zfs %v: exit %d, output %q, left %q", args, code, strings.TrimSpace(string(out)), strings.Fields(namesBelow(t, ref)))
-		exec.Command("zfs", "destroy", "-rR", ref).Run()
-	}
-	mine := wds(t, pool, "ev_mine")
-	_, err := c.Receive(context.Background(), bytes.NewReader(in), mine, &ReceiveOptions{NoMount: true})
-	t.Errorf("EVIDENCE (not a failure): "+"here: %v, left %q", err, strings.Fields(namesBelow(t, mine)))
-	exec.Command("zfs", "destroy", "-rR", mine).Run()
 }

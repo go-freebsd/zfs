@@ -148,7 +148,10 @@ streams and, like `zfs send -n`, counts the first stream of a clone as a full on
 `Intermediates` now writes the replication stream `zfs send -I` writes (earlier versions
 wrote the plain streams one after the other; `Receive` takes both). A replication stream
 whose stream for a child lacks the child's base snapshot (dropped from the middle) is an
-error here; `zfs receive` exits 0 and leaves the child out. The header is limited
+error here. `zfs receive` exits 0 when the sender's pool is the receiving pool: libzfs finds
+the base snapshot by GUID on the sender's dataset, resolves the destination to it and ignores
+the snapshot that exists there; with a pool of its own libzfs's code fails too (`destination does not
+exist`). Receiving into the sender's dataset is not copied. The header is limited
 to 128 MiB. Not done: `receive -o` per dataset (the CLI has none either). `ErrReplicationStream` is no longer
 returned.
 
