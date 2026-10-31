@@ -341,3 +341,62 @@ func TestSendReplicationLikeZfs(t *testing.T) {
 		cli(t, "zfs", "destroy", "-rR", mine)
 	}
 }
+
+// An incremental replication stream changes the target tree to follow the
+// source: new datasets arrive, what the sender destroyed is destroyed (with
+// Force), renamed snapshots and datasets are renamed, promoted clones are
+// promoted. The result is what zfs receive makes of the same stream.
+func TestReceiveReconcilesLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+
+	for name, tc := range map[string]struct {
+		mutate func(t *testing.T, src string)
+		force  bool
+	}{
+		"new child":                {func(t *testing.T, src string) { cli(t, "zfs", "create", "-o", "mountpoint=none", src+"/fresh") }, false},
+		"destroyed snapshot":       {func(t *testing.T, src string) { cli(t, "zfs", "destroy", "-r", src+"@x") }, true},
+		"destroyed snapshot, kept": {func(t *testing.T, src string) { cli(t, "zfs", "destroy", "-r", src+"@x") }, false},
+		"destroyed dataset":        {func(t *testing.T, src string) { cli(t, "zfs", "destroy", "-r", src+"/gone") }, true},
+		"destroyed dataset, kept":  {func(t *testing.T, src string) { cli(t, "zfs", "destroy", "-r", src+"/gone") }, false},
+		"renamed snapshot":         {func(t *testing.T, src string) { cli(t, "zfs", "rename", "-r", src+"@x", "@y") }, false},
+		"renamed dataset":          {func(t *testing.T, src string) { cli(t, "zfs", "rename", src+"/gone", src+"/moved") }, false},
+		"promoted clone":           {func(t *testing.T, src string) { cli(t, "zfs", "promote", src+"/cl") }, false},
+	} {
+		src, _ := source(t, c, pool, "rc_src", map[string]any{"compression": "zle"}, map[string]string{"a": "one"})
+		for _, kid := range []string{"kid", "gone"} {
+			if err := c.Create(src+"/"+kid, &CreateOptions{Props: map[string]any{"mountpoint": "none"}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cli(t, "zfs", "snapshot", "-r", src+"@x")
+		cli(t, "zfs", "clone", "-o", "mountpoint=none", src+"/kid@x", src+"/cl")
+		cli(t, "zfs", "snapshot", "-r", src+"@a")
+
+		ref, mine := wds(t, pool, "rc_ref"), wds(t, pool, "rc_mine")
+		base := theirs(t, "-R", src+"@a")
+		zreceive(t, base, "-u", ref)
+		zreceive(t, base, "-u", mine)
+		before := treeState(t, ref)
+
+		tc.mutate(t, src)
+		cli(t, "zfs", "snapshot", "-r", src+"@b")
+		stream := theirs(t, "-R", "-i", "@a", src+"@b")
+
+		args := []string{"-u"}
+		if tc.force {
+			args = append(args, "-F")
+		}
+		zreceive(t, stream, append(args, ref)...)
+		got, err := c.Receive(context.Background(), bytes.NewReader(stream), mine, &ReceiveOptions{NoMount: true, Force: tc.force})
+		if err != nil {
+			t.Errorf("%s: %v (%d streams)", name, err, len(got))
+		}
+		sameTrees(t, name, ref, mine)
+		if after := treeState(t, ref); strings.Join(before, "\n") == strings.Join(after, "\n") {
+			t.Errorf("%s: the stream changed nothing: the comparison would prove nothing", name)
+		}
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
+		cli(t, "zfs", "destroy", "-rR", src)
+	}
+}

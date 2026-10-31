@@ -29,6 +29,26 @@ func (c *Client) receivePackage(ctx context.Context, src *os.File, h *StreamHead
 	sendfs := h.Dataset()
 	holds := h.Features&FeatureHolds != 0 && !o.SkipHolds
 
+	// An incremental stream of a tree: first bring the target in line with
+	// what the sender did to its tree since the base snapshot.
+	var soft bool
+	var tofs string
+	reconciling := p.FromSnap != "" && p.Recursive() && !o.DryRun
+	if reconciling {
+		hn, err := receiveNameFrom(target, h, o.Layout, sendfs)
+		if err != nil {
+			return nil, err
+		}
+		tofs, _, _ = strings.Cut(hn, "@")
+		var renamed []string
+		soft = c.reconcile(p, tofs, o, &renamed)
+		for _, n := range renamed { // do not receive into a tree that is mounted at its old place
+			if cl, err := c.gather(n, "mountpoint", false); err == nil {
+				cl.prefix()
+			}
+		}
+	}
+
 	var (
 		got  []Received
 		top  string
@@ -110,11 +130,18 @@ func (c *Client) receivePackage(ctx context.Context, src *os.File, h *StreamHead
 			}
 		}
 	}
-	if o.DryRun || o.NoMount || top == "" {
-		return got, nil
+	if reconciling && c.reconcile(p, tofs, o, nil) {
+		soft = true
 	}
-	if err := c.MountAll(top, nil); err != nil {
-		return got, err
+	var mountErr error
+	if !o.DryRun && !o.NoMount && top != "" {
+		mountErr = c.MountAll(top, nil)
+	}
+	if mountErr != nil {
+		return got, mountErr
+	}
+	if soft {
+		return got, ErrPartialReceive
 	}
 	return got, nil
 }

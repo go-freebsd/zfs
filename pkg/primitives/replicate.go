@@ -161,7 +161,7 @@ func (r *replSend) iterateFS(d *Dataset) error {
 	if toTxg != 0 {
 		r.toTxg = toTxg
 	}
-	if toTxg == 0 {
+	if toTxg == 0 && r.to != "" {
 		switch {
 		case r.toTxg != 0 && d.CreationTxg > r.toTxg:
 			return nil // created after the snapshot: it is not part of the stream
@@ -243,7 +243,7 @@ func (r *replSend) iterateFS(d *Dataset) error {
 		}
 		return nil
 	}
-	if r.doall || r.recursive {
+	if r.doall || r.recursive || r.to == "" {
 		for _, s := range snaps {
 			if err := iter(s); err != nil {
 				return err
