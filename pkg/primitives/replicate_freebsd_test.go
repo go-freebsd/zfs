@@ -801,11 +801,14 @@ func TestReplicationForceOnADivergedTarget(t *testing.T) {
 			// Written to since the base snapshot: the target diverged.
 			dir := tdir(t)
 			cli(t, "zfs", "set", "mountpoint="+dir, d)
-			cli(t, "zfs", "mount", d)
+			exec.Command("zfs", "mount", d).Run() // setting the mountpoint may have mounted it already
 			if err := os.WriteFile(filepath.Join(dir, "local"), []byte("not in the stream"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			cli(t, "zfs", "unmount", d)
+			if cli(t, "zfs", "get", "-H", "-o", "value", "mounted", d) != "no" {
+				t.Fatalf("%s is still mounted", d)
+			}
 		}
 		args := []string{"-u"}
 		if force {
