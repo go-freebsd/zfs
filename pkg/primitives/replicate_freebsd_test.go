@@ -369,7 +369,8 @@ func TestReceiveReconcilesLikeZfs(t *testing.T) {
 			}
 		}
 		cli(t, "zfs", "snapshot", "-r", src+"@x")
-		cli(t, "zfs", "clone", "-o", "mountpoint=none", src+"/kid@x", src+"/cl")
+		cli(t, "zfs", "snapshot", src+"/kid@o") // the clone's origin, so that @x can go
+		cli(t, "zfs", "clone", "-o", "mountpoint=none", src+"/kid@o", src+"/cl")
 		cli(t, "zfs", "snapshot", "-r", src+"@a")
 
 		ref, mine := wds(t, pool, "rc_ref"), wds(t, pool, "rc_mine")
