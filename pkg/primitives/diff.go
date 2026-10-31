@@ -44,10 +44,10 @@ type DiffEntry struct {
 	LinkDelta int
 }
 
-// dmu_diff_record_t
+// dmu_diff_record_t: ddr_type is DDR_NONE (1), DDR_INUSE or DDR_FREE.
 const (
-	ddrFree  = 0
-	ddrInUse = 1
+	ddrInUse = 2
+	ddrFree  = 4
 	ddrSize  = 24
 )
 
