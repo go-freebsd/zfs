@@ -14,9 +14,13 @@ import (
 var (
 	ErrNotFound   = fs.ErrNotExist   // the dataset, snapshot, bookmark or hold does not exist
 	ErrExists     = fs.ErrExist      // the name is taken
-	ErrPermission = fs.ErrPermission // not root, or not delegated, or a read-only pool
+	ErrPermission = fs.ErrPermission // not root, or not delegated
 	ErrBusy       = syscall.EBUSY    // mounted, held, cloned, or otherwise in use
 	ErrNoSpace    = syscall.ENOSPC   // the pool or a quota is full
+	// ErrReadOnlyPool is the error of writing to a pool that is imported
+	// read-only (zpool import -o readonly=on): create, receive, snapshot, set
+	// and destroy fail with it, nothing is changed.
+	ErrReadOnlyPool = syscall.EROFS
 
 	// ErrInvalidOption is returned before anything is sent when an Option
 	// does not apply to the operation, for example Parents() to Set.

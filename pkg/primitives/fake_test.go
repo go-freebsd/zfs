@@ -18,6 +18,8 @@ type fakeKernel struct {
 	children          map[string][]string // parent -> children in "ZAP order" (unsorted on purpose)
 	snaps             map[string][]string // dataset -> snapshot names in kernel order
 	pools             []string
+	readOnlyPools     map[string]bool // pools imported read-only
+	poolPropCalls     []string
 	bareBookmarkProps bool // answer GET_BOOKMARKS with bare values instead of {value} lists
 
 	iters   map[uint64]string // cursor token -> parent it was started for
@@ -239,6 +241,24 @@ func (k *fakeKernel) Do(ioc ioctl.IOC, cmd *ioctl.Cmd, in *nvlist.List) (*nvlist
 			out.Add(p, nvlist.New())
 		}
 		cmd.Cookie++
+		return out, nil
+
+	case ioctl.IOCPoolGetProps:
+		k.poolPropCalls = append(k.poolPropCalls, cmd.GetName())
+		known := false
+		for _, p := range k.pools {
+			known = known || p == cmd.GetName()
+		}
+		if !known {
+			return nil, k.fail(ioc, cmd.GetName(), syscall.ENOENT)
+		}
+		out := nvlist.New()
+		ro := nvlist.New()
+		ro.Add("value", map[bool]uint64{false: 0, true: 1}[k.readOnlyPools[cmd.GetName()]])
+		out.Add("readonly", ro)
+		size := nvlist.New()
+		size.Add("value", uint64(1<<30))
+		out.Add("size", size)
 		return out, nil
 	}
 	k.t.Fatalf("fake: unexpected Do(%v)", ioc)

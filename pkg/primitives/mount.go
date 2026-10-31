@@ -200,6 +200,18 @@ func mountOptionList(d *Dataset, given []string) []string {
 	return opts
 }
 
+// readOnlyOptions makes a mount option list read-only, as zfs_mount_at does
+// for a pool imported read-only: any "rw" goes, "ro" is there once.
+func readOnlyOptions(list []string) []string {
+	out := make([]string, 0, len(list)+1)
+	for _, o := range list {
+		if o != "rw" && o != "ro" {
+			out = append(out, o)
+		}
+	}
+	return append(out, "ro")
+}
+
 // Mount mounts a filesystem at its mountpoint, like zfs mount. A dataset
 // that is not mountable (mountpoint none/legacy, canmount=off, ...) fails
 // with a *NotMountableError; canmount=noauto is mounted, because the call is
@@ -258,6 +270,9 @@ func (c *Client) mountAt(d *Dataset, mp string, opts *MountOptions) error {
 		}
 	}
 	list := mountOptionList(d, opts.Options)
+	if ro, err := c.PoolReadOnly(poolOf(d.Name)); err == nil && ro {
+		list = readOnlyOptions(list) // nothing can be written to the pool
+	}
 	if opts.Remount {
 		list = append([]string{"update"}, list...)
 	}

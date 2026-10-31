@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -844,4 +845,149 @@ func TestReplicationForceOnADivergedTarget(t *testing.T) {
 		cli(t, "zfs", "destroy", "-rR", ref)
 		cli(t, "zfs", "destroy", "-rR", mine)
 	}
+}
+
+// tryBoth feeds the same bytes to zfs receive -u and to Receive, each into a
+// fresh target, and returns both errors and what each left behind.
+func tryBoth(t *testing.T, c *Client, pool string, in []byte) (refErr, mineErr error, ref, mine string) {
+	t.Helper()
+	rd, md := wds(t, pool, "tb_ref"), wds(t, pool, "tb_mine")
+	cmd := exec.Command("zfs", "receive", "-u", rd)
+	cmd.Stdin = bytes.NewReader(in)
+	refErr = cmd.Run()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Receive(ctx, bytes.NewReader(in), md, &ReceiveOptions{NoMount: true})
+		done <- err
+	}()
+	select {
+	case mineErr = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Receive did not return for %d bytes of input", len(in))
+	}
+	ref, mine = namesBelow(t, rd), namesBelow(t, md)
+	releaseAll(rd)
+	releaseAll(md)
+	exec.Command("zfs", "destroy", "-rR", rd).Run()
+	exec.Command("zfs", "destroy", "-rR", md).Run()
+	return
+}
+
+// part is a piece of a replication stream.
+type part struct {
+	ds, snap string
+	b        []byte
+}
+
+// splitStream cuts a replication stream into its header, the streams of the
+// snapshots and the closing record.
+func splitStream(t *testing.T, stream []byte) (head []byte, subs []part, tail []byte) {
+	t.Helper()
+	r := bytes.NewReader(stream)
+	h, _, err := readHeaderOrEnd(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPackage(r, h); err != nil {
+		t.Fatal(err)
+	}
+	pos := func() int { return len(stream) - r.Len() }
+	head = stream[:pos()]
+	for {
+		start := pos()
+		sh, end, err := readHeaderOrEnd(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if end {
+			return head, subs, stream[start:]
+		}
+		if _, err := skipStream(r, sh, sh.ToName); err != nil {
+			t.Fatal(err)
+		}
+		subs = append(subs, part{sh.Dataset(), sh.Snapshot(), stream[start:pos()]})
+	}
+}
+
+// A replication stream cut off or damaged inside its header fails for both
+// zfs receive and Receive and creates nothing; one whose streams come in a
+// different order or lack one gets the same verdict from both and leaves the
+// same datasets.
+func TestReplicationHeaderCutDamagedAndReordered(t *testing.T) {
+	c, pool := testClient(t)
+	src := plainTree(t, pool, "ph_src")
+	full := theirs(t, "-R", src+"@b")
+	head, subs, tail := splitStream(t, full)
+	pl := int(binary.NativeEndian.Uint32(full[4:]))
+	hdrEnd := len(head)
+	if len(subs) != 4 || hdrEnd != 312+pl+312 {
+		t.Fatalf("stream layout: %d substreams, header %d bytes, payload %d", len(subs), hdrEnd, pl)
+	}
+
+	t.Run("cut", func(t *testing.T) {
+		for _, off := range []int{0, 1, 100, 311, 312, 313, 312 + pl/2, 312 + pl - 1, 312 + pl, 312 + pl + 1,
+			312 + pl + 311, hdrEnd, hdrEnd + 1, hdrEnd + 100, hdrEnd + 311, hdrEnd + 312} {
+			refErr, mineErr, ref, mine := tryBoth(t, c, pool, full[:off])
+			if off < hdrEnd && (refErr == nil || mineErr == nil) {
+				t.Errorf("cut at %d (inside the header): zfs receive: %v; here: %v", off, refErr, mineErr)
+			}
+			if (refErr == nil) != (mineErr == nil) || ref != mine {
+				t.Errorf("cut at %d: zfs receive: %v, left %q; here: %v, left %q", off, refErr, ref, mineErr, mine)
+			}
+		}
+	})
+
+	t.Run("damaged", func(t *testing.T) {
+		for name, off := range map[string]int{"payload": 312 + 3, "payload end": 312 + pl - 2, "checksum": 312 + pl + 8 + 2} {
+			bad := append([]byte(nil), full...)
+			bad[off] ^= 0x55
+			refErr, mineErr, ref, mine := tryBoth(t, c, pool, bad)
+			if refErr == nil || mineErr == nil {
+				t.Errorf("%s: zfs receive: %v; here: %v", name, refErr, mineErr)
+			}
+			if !errors.Is(mineErr, ErrBadPackage) && !errors.Is(mineErr, ErrNotAStream) {
+				t.Errorf("%s: error %v is not a damaged-header error", name, mineErr)
+			}
+			if ref != mine {
+				t.Errorf("%s: left\nzfs receive: %q\nhere:        %q", name, ref, mine)
+			}
+		}
+	})
+
+	t.Run("reordered", func(t *testing.T) {
+		join := func(order ...int) []byte {
+			out := append([]byte(nil), head...)
+			for _, i := range order {
+				out = append(out, subs[i].b...)
+			}
+			return append(out, tail...)
+		}
+		idx := map[string]int{}
+		for i, p := range subs {
+			idx[p.ds[strings.LastIndexByte(p.ds, '/')+1:]+"@"+p.snap] = i
+		}
+		kid := "kid"
+		srcA, srcB := idx[src[strings.LastIndexByte(src, '/')+1:]+"@a"], idx[src[strings.LastIndexByte(src, '/')+1:]+"@b"]
+		kidA, kidB := idx[kid+"@a"], idx[kid+"@b"]
+		for name, in := range map[string][]byte{
+			"child before parent":   join(kidA, kidB, srcA, srcB),
+			"snapshots swapped":     join(srcB, srcA, kidA, kidB),
+			"newest dropped":        join(srcA, kidA, kidB),
+			"first of the child":    join(srcA, srcB, kidB),
+			"a stream twice":        join(srcA, srcA, srcB, kidA, kidB),
+			"only the header":       join(),
+			"no closing record":     append(join(srcA, srcB, kidA, kidB)[:len(full)-312], 0),
+			"streams without close": join(srcA, srcB, kidA, kidB)[:len(full)-312],
+		} {
+			refErr, mineErr, ref, mine := tryBoth(t, c, pool, in)
+			if (refErr == nil) != (mineErr == nil) || ref != mine {
+				t.Errorf("%s: zfs receive: %v, left %q\n  here: %v, left %q", name, refErr, ref, mineErr, mine)
+			} else {
+				t.Logf("%s: both %s; left %d lines", name, map[bool]string{true: "accept", false: "refuse"}[refErr == nil], strings.Count(mine, "\n"))
+			}
+		}
+	})
 }

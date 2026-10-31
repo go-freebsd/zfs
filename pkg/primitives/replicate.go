@@ -525,7 +525,9 @@ func (c *Client) sendPackage(ctx context.Context, snapshot string, w io.Writer, 
 	}
 
 	// Holds keep the snapshots from going away while the stream is written.
-	if r.doall || r.recursive {
+	// A read-only pool cannot take holds, and its snapshots cannot go away.
+	readOnly, _ := c.PoolReadOnly(r.pool)
+	if (r.doall || r.recursive) && !readOnly {
 		tag := fmt.Sprintf(".send-%d-%d", os.Getpid(), holdSeq.Add(1))
 		seen := map[string]bool{}
 		var held []string

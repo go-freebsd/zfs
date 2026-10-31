@@ -682,3 +682,12 @@ func TestMountErrorsClassify(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestReadOnlyPoolClassifies(t *testing.T) {
+	c, s := newStub()
+	s.err = &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: "tank", Errno: syscall.EROFS}
+	_, err := c.Dataset("tank/a").Receive(context.Background(), strings.NewReader(""))
+	if !errors.Is(err, ErrReadOnlyPool) {
+		t.Errorf("receive: %v", err)
+	}
+}
