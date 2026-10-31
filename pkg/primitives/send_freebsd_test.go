@@ -194,9 +194,7 @@ func TestSendReceiveFullAndIncremental(t *testing.T) {
 
 	// -I: both steps in one stream, received in one call.
 	dst4 := wds(t, pool, "sr_dst4")
-	// zfs send -I writes a replication stream (a header listing the snapshots
-	// in front of the streams); this library writes the plain streams one after
-	// the other. Both carry the same snapshots.
+	// zfs send -I writes a replication stream, and so does this library.
 	inter := ours(t, c, src+"@c", &SendOptions{From: "@a", Intermediates: true})
 	if h, _ := ParseStreamHeader(theirs(t, "-I", src+"@a", src+"@c")); h == nil || !h.Compound {
 		t.Errorf("zfs send -I no longer writes a compound stream: %+v", h)

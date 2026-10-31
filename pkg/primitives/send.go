@@ -23,11 +23,23 @@ type SendOptions struct {
 	From string
 
 	// Intermediates (like zfs send -I) also sends every snapshot between
-	// From and the snapshot, each as its own stream, one after the other;
-	// Receive and zfs receive both take that. (zfs send -I itself writes a
-	// replication stream, which Receive refuses.) From must be a snapshot.
-	// Without it only the difference between the two is sent (zfs send -i).
+	// From and the snapshot: one replication stream that holds a stream per
+	// snapshot, as zfs send -I writes it. From must be a snapshot. Without it
+	// only the difference between the two is sent (zfs send -i).
 	Intermediates bool
+
+	// Replicate (zfs send -R) sends the dataset with its descendants, their
+	// snapshots, clones and properties, as one replication stream. With From
+	// the stream is incremental.
+	Replicate bool
+	// Props (zfs send -p) sends the properties of the dataset and the
+	// snapshot in front of the stream.
+	Props bool
+	// Holds (zfs send -h) sends the holds on the snapshots too.
+	Holds bool
+	// SkipMissing (zfs send --skip-missing) skips descendants that lack the
+	// snapshot, with a warning, instead of failing.
+	SkipMissing bool
 
 	LargeBlocks bool // -L: blocks larger than 128 KiB
 	EmbedData   bool // -e: embedded data blocks
@@ -208,75 +220,32 @@ func (c *Client) Send(ctx context.Context, snapshot string, w io.Writer, o *Send
 	if o == nil {
 		o = &SendOptions{}
 	}
-	if !o.Intermediates {
-		return c.sendOne(ctx, snapshot, w, o)
+	if o.Replicate || o.Props || o.Holds || o.Intermediates {
+		return c.sendPackage(ctx, snapshot, w, o)
 	}
-	steps, err := c.intermediateSteps(snapshot, o)
-	if err != nil {
-		return err
-	}
-	for _, s := range steps {
-		step := *o
-		step.From, step.Intermediates = s.from, false
-		if err := c.sendOne(ctx, s.to, w, &step); err != nil {
-			return fmt.Errorf("zfs: send %s: %w", s.to, err)
-		}
-	}
-	return nil
-}
-
-type sendStep struct{ from, to string }
-
-// intermediateSteps lists the incremental steps from o.From to snapshot.
-func (c *Client) intermediateSteps(snapshot string, o *SendOptions) ([]sendStep, error) {
-	ds := datasetOf(snapshot)
-	from := expand(ds, o.From)
-	if !strings.Contains(from, "@") {
-		return nil, errors.New("zfs: send: intermediates need From to be a snapshot")
-	}
-	var names []string
-	err := c.Walk(ds, ListOptions{Types: Snapshot}, func(d *Dataset) error {
-		names = append(names, d.Name)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	fi, ti := indexOf(names, from), indexOf(names, snapshot)
-	switch {
-	case fi < 0:
-		return nil, fmt.Errorf("zfs: send: %s does not exist", from)
-	case ti < 0:
-		return nil, fmt.Errorf("zfs: send: %s does not exist", snapshot)
-	case fi >= ti:
-		return nil, fmt.Errorf("zfs: send: %s is not older than %s", from, snapshot)
-	}
-	var steps []sendStep
-	for i := fi + 1; i <= ti; i++ {
-		steps = append(steps, sendStep{from: names[i-1], to: names[i]})
-	}
-	return steps, nil
-}
-
-func indexOf(s []string, v string) int {
-	for i, x := range s {
-		if x == v {
-			return i
-		}
-	}
-	return -1
+	return c.sendOne(ctx, snapshot, w, o)
 }
 
 func (c *Client) sendOne(ctx context.Context, snapshot string, w io.Writer, o *SendOptions) error {
+	return c.sink(ctx, w, func(out *os.File) error {
+		fd := int(out.Fd()) // blocking, as the kernel needs it
+		stop := c.watchProgress(snapshot, fd, o)
+		defer stop()
+		return c.SendFD(snapshot, fd, o)
+	})
+}
+
+// sink gives fn a file the kernel can write a stream to, and moves what is
+// written there into w. For an *os.File that is the file itself (it cannot be
+// interrupted); any other writer is fed through a pipe by a goroutine. An
+// error from w ends the send, and so does cancelling ctx.
+func (c *Client) sink(ctx context.Context, w io.Writer, fn func(out *os.File) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if f, ok := w.(*os.File); ok {
-		fd := int(f.Fd()) // makes the descriptor blocking
-		stop := c.watchProgress(snapshot, fd, o)
-		err := c.SendFD(snapshot, fd, o)
-		stop()
-		return err
+		f.Fd() // makes the descriptor blocking
+		return fn(f)
 	}
 
 	pr, pw, err := os.Pipe()
@@ -302,10 +271,7 @@ func (c *Client) sendOne(ctx context.Context, snapshot string, w io.Writer, o *S
 		}
 	}()
 
-	fd := int(pw.Fd()) // blocking, as the kernel needs it
-	stop := c.watchProgress(snapshot, fd, o)
-	sendErr := c.SendFD(snapshot, fd, o)
-	stop()
+	sendErr := fn(pw)
 	pw.Close() // end of stream for the copier
 	var copyErr error
 	select {

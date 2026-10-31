@@ -278,8 +278,21 @@ func TestSendIntermediatesSendsEachStep(t *testing.T) {
 	if err := c.Send(context.Background(), "tank/a@s3", &buf, &SendOptions{From: "@s1", Intermediates: true, Compress: true}); err != nil {
 		t.Fatal(err)
 	}
-	if buf.String() != "[1>2][2>3]" {
-		t.Errorf("stream = %q", buf.String())
+	// zfs send -I writes a replication stream: the compound header (no
+	// payload for -I alone), the streams of the steps, and the empty END.
+	rd := bytes.NewReader(buf.Bytes())
+	h, end, err := readHeaderOrEnd(rd)
+	if err != nil || end || !h.Compound || h.ToName != "tank/a@s3" || h.PayloadLen != 0 {
+		t.Fatalf("header %+v end=%v err=%v", h, end, err)
+	}
+	if _, err := readPackage(rd, h); err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, rd.Len())
+	rd.Read(body)
+	if len(body) != len("[1>2][2>3]")+ioctl.ReplayRecordSize || string(body[:10]) != "[1>2][2>3]" ||
+		binary.NativeEndian.Uint32(body[10:]) != drrEnd || !allZero(body[14:]) {
+		t.Errorf("after the header: %q", body)
 	}
 	var froms []string
 	for _, w := range k.writes {
@@ -592,4 +605,13 @@ func TestResumeTokenPropertyAndAbort(t *testing.T) {
 	if w := lastWrite(t, k); w.ioc != ioctl.IOCDestroy || w.name != "tank/a/%recv" {
 		t.Errorf("abort = %+v", w)
 	}
+}
+
+func allZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }

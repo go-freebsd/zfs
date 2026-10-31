@@ -5,6 +5,7 @@ package primitives
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
@@ -26,8 +27,12 @@ func replTree(t *testing.T, c *Client, pool, name string) (src string) {
 	cli(t, "zfs", "set", "repl:note=hello", src)
 	snap(t, c, src+"@a")
 	snap(t, c, child+"@a")
+	// A clone inside the tree: its stream starts from its origin, which has
+	// to be sent first.
+	cli(t, "zfs", "clone", "-o", "mountpoint=none", child+"@a", src+"/kid_clone")
 	snap(t, c, src+"@b")
 	snap(t, c, child+"@b")
+	snap(t, c, src+"/kid_clone@b")
 	return src
 }
 
@@ -217,5 +222,122 @@ func holdRows(root string) [][]string {
 func releaseAll(root string) {
 	for _, f := range holdRows(root) {
 		exec.Command("zfs", "release", f[1], f[0]).Run()
+	}
+}
+
+// canon renders an nvlist independent of the order of its pairs.
+func canon(l *nvlist.List) string {
+	names := l.Names()
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		v, _ := l.Get(n)
+		switch x := v.(type) {
+		case *nvlist.List:
+			fmt.Fprintf(&b, "%s={%s};", n, canon(x))
+		default:
+			fmt.Fprintf(&b, "%s=%v;", n, x)
+		}
+	}
+	return b.String()
+}
+
+// shape describes a replication stream: its header and the sequence of the
+// streams in it.
+type shape struct {
+	header  string
+	subs    []string
+	payload int
+}
+
+func shapeOf(t *testing.T, stream []byte) shape {
+	t.Helper()
+	r := bytes.NewReader(stream)
+	h, end, err := readHeaderOrEnd(r)
+	if err != nil || end || !h.Compound {
+		t.Fatalf("header %+v end=%v err=%v", h, end, err)
+	}
+	p, err := readPackage(r, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := shape{header: fmt.Sprintf("%s features=%v payload=%d from=%q to=%q notrec=%v raw=%v", h.ToName, h.Features, h.PayloadLen, p.FromSnap, p.ToSnap, p.NotRecursive, p.Raw), payload: int(h.PayloadLen)}
+	if p.FSS != nil {
+		sh.header += " fss={" + canon(p.FSS) + "}"
+	}
+	for {
+		s, end, err := readHeaderOrEnd(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if end {
+			break
+		}
+		if _, err := skipStream(r, s, s.ToName); err != nil {
+			t.Fatal(err)
+		}
+		sh.subs = append(sh.subs, fmt.Sprintf("%s from=%x to=%x clone=%v", s.ToName, s.FromGUID, s.ToGUID, s.Clone))
+	}
+	if r.Len() != 0 {
+		t.Fatalf("%d bytes after the closing record", r.Len())
+	}
+	return sh
+}
+
+// Replication streams made here have the header zfs send writes, the same
+// streams in the same order, and are received by zfs receive as the streams
+// of zfs send are.
+func TestSendReplicationLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := replTree(t, c, pool, "rs_src")
+	cli(t, "zfs", "hold", "keep", src+"@a", src+"/kid@a")
+	t.Cleanup(func() { releaseAll(src) })
+
+	baseStream := theirs(t, "-R", src+"@a")
+	for name, tc := range map[string]struct {
+		args []string
+		opts SendOptions
+		base bool
+	}{
+		"-R":  {[]string{"-R", src + "@b"}, SendOptions{Replicate: true}, false},
+		"-p":  {[]string{"-p", src + "@b"}, SendOptions{Props: true}, false},
+		"-I":  {[]string{"-I", "@a", src + "@b"}, SendOptions{From: "@a", Intermediates: true}, true},
+		"-Rh": {[]string{"-R", "-h", src + "@b"}, SendOptions{Replicate: true, Holds: true}, false},
+		"-RI": {[]string{"-R", "-I", "@a", src + "@b"}, SendOptions{Replicate: true, Intermediates: true, From: "@a"}, true},
+		"-Ri": {[]string{"-R", "-i", "@a", src + "@b"}, SendOptions{Replicate: true, From: "@a"}, true},
+		"-ph": {[]string{"-p", "-h", src + "@b"}, SendOptions{Props: true, Holds: true}, false},
+	} {
+		want := theirs(t, tc.args...)
+		o := tc.opts
+		got := ours(t, c, src+"@b", &o)
+		ws, gs := shapeOf(t, want), shapeOf(t, got)
+		if ws.header != gs.header {
+			t.Errorf("%s: header\nzfs:  %s\nhere: %s", name, ws.header, gs.header)
+		}
+		if strings.Join(ws.subs, "\n") != strings.Join(gs.subs, "\n") {
+			t.Errorf("%s: streams\nzfs:\n%s\nhere:\n%s", name, strings.Join(ws.subs, "\n"), strings.Join(gs.subs, "\n"))
+		}
+		if len(ws.subs) == 0 {
+			t.Fatalf("%s: no streams: the comparison would prove nothing", name)
+		}
+		if len(want) != len(got) {
+			t.Errorf("%s: %d bytes here, zfs sent %d", name, len(got), len(want))
+		}
+
+		// zfs receive takes ours as it takes its own.
+		ref := wds(t, pool, "rs_ref")
+		mine := wds(t, pool, "rs_mine")
+		t.Cleanup(func() { releaseAll(ref); releaseAll(mine) })
+		if tc.base {
+			zreceive(t, baseStream, "-u", ref)
+			zreceive(t, baseStream, "-u", mine)
+		}
+		zreceive(t, want, "-u", ref)
+		zreceive(t, got, "-u", mine)
+		sameTrees(t, name, ref, mine)
+		releaseAll(ref)
+		releaseAll(mine)
+		cli(t, "zfs", "destroy", "-rR", ref)
+		cli(t, "zfs", "destroy", "-rR", mine)
 	}
 }
