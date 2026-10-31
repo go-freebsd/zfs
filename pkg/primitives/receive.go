@@ -298,7 +298,7 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 	// A full stream onto an existing dataset needs Force, whatever the
 	// snapshot: libzfs says so before it asks the kernel.
 	if exists && newfs && !o.Force {
-		return rec, &ReceiveError{Received: rec, Err: &ioctl.Error{Ioc: ioctl.IOCRecvNew, Name: ds, Errno: syscall.EEXIST}}
+		return rec, &ReceiveError{Received: rec, Err: &needsForceError{ds}}
 	}
 	var cl *changelist
 	if exists && h.Type == Filesystem && (newfs || h.Resuming && h.FromGUID == 0) {
@@ -560,3 +560,12 @@ func removeAll(s, drop []string) []string {
 	}
 	return out
 }
+
+// needsForceError is the refusal to replace an existing dataset without Force.
+// It matches EEXIST, like the kernel's error for the same thing.
+type needsForceError struct{ dataset string }
+
+func (e *needsForceError) Error() string {
+	return "destination " + e.dataset + " exists: Force is needed to overwrite it"
+}
+func (e *needsForceError) Unwrap() error { return syscall.EEXIST }

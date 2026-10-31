@@ -166,7 +166,13 @@ func withoutKeylocation(props *nvlist.List) *nvlist.List {
 	return copyList(props, []string{"keylocation"})
 }
 
+// isExists reports whether the kernel said that the snapshot is there already.
+// The refusal to overwrite a dataset without Force is not that.
 func isExists(err error) bool {
+	var nf *needsForceError
+	if errors.As(err, &nf) {
+		return false
+	}
 	return errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.ENOENT)
 }
 
