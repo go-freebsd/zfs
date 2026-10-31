@@ -272,7 +272,9 @@ func TestSnapshotPropertiesLikeZfs(t *testing.T) {
 		t.Fatal(err)
 	}
 	get := func(d string) string {
-		return strings.ReplaceAll(cli(t, "zfs", "get", "-H", "-o", "property,value,source", "-s", "local", "all", d+"@a"), d, "ROOT")
+		l := lines(strings.ReplaceAll(cli(t, "zfs", "get", "-H", "-o", "property,value,source", "-s", "local", "all", d+"@a"), d, "ROOT"))
+		sort.Strings(l)
+		return strings.Join(l, "\n")
 	}
 	if a, b := get(ref), get(mine); a != b || !strings.Contains(a, "repl:note") {
 		t.Errorf("properties differ\nzfs:\n%s\nhere:\n%s", a, b)

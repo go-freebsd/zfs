@@ -195,9 +195,21 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 	}
 	// The ioctl takes the filesystem that holds the new dataset: the target
 	// itself if it exists, else its parent.
-	if o.Parents {
-		if _, err := c.createParents(ds); err != nil {
+	if o.Parents || o.Layout == LayoutDiscardPool {
+		made, err := c.createParents(ds)
+		if err != nil {
 			return rec, err
+		}
+		// zfs receive -d keeps the path of the stream below the target and
+		// creates the ancestors it lacks (create_parents): it mounts them too,
+		// even with -u, where the mountpoint allows.
+		for _, m := range made {
+			if o.Layout != LayoutDiscardPool {
+				break
+			}
+			if err := c.Mount(m, nil); err != nil && !errors.Is(err, ErrNotMountable) && !errors.Is(err, errors.ErrUnsupported) {
+				return rec, fmt.Errorf("zfs: receive: failed to mount ancestor %q: %w", m, err)
+			}
 		}
 	}
 	fsname := ds

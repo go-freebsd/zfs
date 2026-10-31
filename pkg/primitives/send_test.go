@@ -619,3 +619,40 @@ func allZero(b []byte) bool {
 	}
 	return true
 }
+
+// receive -d keeps the path of the stream below the target and makes the
+// ancestors it lacks (create_parents), without Parents; an exact layout does
+// not.
+func TestReceiveDiscardPoolCreatesTheAncestors(t *testing.T) {
+	created := func(k *fakeKernel) []string {
+		var out []string
+		for _, w := range k.writes {
+			if w.ioc == ioctl.IOCCreate {
+				out = append(out, w.name)
+			}
+		}
+		return out
+	}
+	k := newFake(t)
+	k.after = func(w writeCall) {
+		if w.ioc == ioctl.IOCCreate {
+			k.fs(w.name, 50)
+		}
+	}
+	c := newClient(k)
+	if _, err := c.Receive(context.Background(), recvInput(stream("pool/p/q/src@x", "")), "tank/a", &ReceiveOptions{Layout: LayoutDiscardPool, NoMount: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := created(k); !reflect.DeepEqual(got, []string{"tank/a/p", "tank/a/p/q"}) {
+		t.Errorf("created %v", got)
+	}
+
+	k = newFake(t)
+	c = newClient(k)
+	// (The fake kernel does not refuse the missing parent; the point is that
+	// nothing is created for it.)
+	c.Receive(context.Background(), recvInput(stream("pool/p/q/src@x", "")), "tank/a/p/q/src", &ReceiveOptions{NoMount: true})
+	if got := created(k); len(got) != 0 {
+		t.Errorf("created %v", got)
+	}
+}

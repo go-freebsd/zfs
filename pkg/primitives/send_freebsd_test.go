@@ -843,7 +843,9 @@ func TestRawSendResumesLikeZfs(t *testing.T) {
 	if _, err := c.Receive(context.Background(), bytes.NewReader(got.Bytes()), mineDst, &ReceiveOptions{NoMount: true, Resumable: true}); err != nil {
 		t.Fatal(err)
 	}
-	sameTrees(t, "resumed raw send", refDst, mineDst)
+	if a, b := treeState(t, refDst), treeState(t, mineDst); strings.Join(a, "\n") != strings.Join(b, "\n") || len(a) < 3 {
+		t.Errorf("resumed raw send: trees differ or hold too little\nzfs: %q\nhere: %q", a, b)
+	}
 	a, b := cryptFacts(t, refDst), cryptFacts(t, mineDst)
 	if missing, extra := diff(a, b); len(missing) > 0 || len(extra) > 0 || len(a) < 4 {
 		t.Errorf("encryption facts differ\nonly in zfs receive's copy: %q\nonly in ours: %q", missing, extra)
