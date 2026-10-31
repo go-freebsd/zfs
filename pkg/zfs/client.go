@@ -89,3 +89,9 @@ type stopError struct{}
 func (stopError) Error() string { return "stop" }
 
 var errStop error = stopError{}
+
+// Mounts lists the mounted ZFS filesystems, sorted by mountpoint.
+func (c *Client) Mounts() ([]Mount, error) {
+	m, err := c.b.Mounts()
+	return m, wrap("mounts", "", err)
+}

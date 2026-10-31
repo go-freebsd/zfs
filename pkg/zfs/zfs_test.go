@@ -563,3 +563,107 @@ func TestStreamErrorsClassify(t *testing.T) {
 		t.Errorf("exists: %v", err)
 	}
 }
+
+func TestMountingOptionsMapToTheKernel(t *testing.T) {
+	c, s := newStub()
+	tank := c.Dataset("tank")
+	if _, err := tank.CreateFilesystem("quiet", NoMount()); err != nil || !s.createOpts.NoMount {
+		t.Errorf("create: %+v %v", s.createOpts, err)
+	}
+	if _, err := tank.CreateFilesystem("loud"); err != nil || s.createOpts.NoMount {
+		t.Errorf("default create mounts: %+v %v", s.createOpts, err)
+	}
+	if _, err := c.Snapshot("tank/a@s").Clone("tank/c", NoMount()); err != nil || !s.createOpts.NoMount {
+		t.Errorf("clone: %+v %v", s.createOpts, err)
+	}
+	if err := tank.Destroy(Recursive(), ForceUnmount()); err != nil || !s.destroyOpt.Force || !s.destroyOpt.Recursive {
+		t.Errorf("destroy: %+v %v", s.destroyOpt, err)
+	}
+
+	if _, err := tank.Receive(context.Background(), strings.NewReader(""), NoMount(), DryRun(), Exclude("compression", "note:x"), Exclude("quota")); err != nil {
+		t.Fatal(err)
+	}
+	o := s.recvOpts
+	if !o.NoMount || !o.DryRun || !reflect.DeepEqual(o.Exclude, []string{"compression", "note:x", "quota"}) {
+		t.Errorf("receive options = %+v", o)
+	}
+
+	if err := tank.Mount(Overlay(), Remount(), WithMountOptions("ro", "nosuid"), WithMountKey(PassphraseKey("x")), MountRedacted()); err != nil {
+		t.Fatal(err)
+	}
+	m := s.mountOpts
+	if !m.Overlay || !m.Remount || !m.Force || m.Key == nil || !reflect.DeepEqual(m.Options, []string{"ro", "nosuid"}) {
+		t.Errorf("mount options = %+v", m)
+	}
+	if err := tank.MountAll(Overlay()); err != nil || s.last() != "MountAll tank" {
+		t.Errorf("MountAll: %v %q", err, s.last())
+	}
+	if err := tank.Unmount(ForceUnmount(), AndUnloadKey()); err != nil || !s.unmountOpts.Force || !s.unmountOpts.UnloadKey {
+		t.Errorf("unmount options = %+v %v", s.unmountOpts, err)
+	}
+	if err := tank.UnmountAll(); err != nil || s.last() != "UnmountAll tank" {
+		t.Errorf("UnmountAll: %v %q", err, s.last())
+	}
+	if w, ok, err := tank.IsMounted(); err != nil || !ok || w != "/tank" {
+		t.Errorf("IsMounted = %q %v %v", w, ok, err)
+	}
+	if p, err := tank.MountPoint(); err != nil || p != "/tank" {
+		t.Errorf("MountPoint = %q %v", p, err)
+	}
+	if ms, err := c.Mounts(); err != nil || len(ms) != 1 || ms[0].Mountpoint != "/tank/a" {
+		t.Errorf("Mounts = %v %v", ms, err)
+	}
+}
+
+func TestMountingOptionMisuse(t *testing.T) {
+	c, s := newStub()
+	tank := c.Dataset("tank")
+	snap := c.Snapshot("tank/a@s")
+	var buf bytes.Buffer
+	for name, f := range map[string]func() error{
+		"NoMount on Set":          func() error { return tank.Set(NoMount()) },
+		"NoMount on Send":         func() error { return snap.Send(context.Background(), &buf, NoMount()) },
+		"Overlay on Create":       func() error { _, err := tank.CreateFilesystem("x", Overlay()); return err },
+		"Overlay on Unmount":      func() error { return tank.Unmount(Overlay()) },
+		"AndUnloadKey on Mount":   func() error { return tank.Mount(AndUnloadKey()) },
+		"ForceUnmount on Mount":   func() error { return tank.Mount(ForceUnmount()) },
+		"ForceUnmount on snap":    func() error { return snap.Destroy(ForceUnmount()) },
+		"Exclude on Send":         func() error { return snap.Send(context.Background(), &buf, Exclude("a")) },
+		"Exclude on Create":       func() error { _, err := tank.CreateFilesystem("x", Exclude("a")); return err },
+		"DryRun on Send":          func() error { return snap.Send(context.Background(), &buf, DryRun()) },
+		"DryRun on Create":        func() error { _, err := tank.CreateFilesystem("x", DryRun()); return err },
+		"WithMountKey on Receive": func() error { _, err := tank.Receive(context.Background(), &buf, WithMountKey(nil)); return err },
+	} {
+		if err := f(); !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("%s: err = %v, want ErrInvalidOption", name, err)
+		}
+	}
+	if len(s.calls) != 0 {
+		t.Errorf("misused options reached the backend: %v", s.calls)
+	}
+}
+
+func TestMountErrorsClassify(t *testing.T) {
+	c, s := newStub()
+	tank := c.Dataset("tank")
+	s.err = &primitives.NotMountableError{Dataset: "tank", Reason: "mountpoint is none"}
+	if err := tank.Mount(); !errors.Is(err, ErrNotMountable) {
+		t.Errorf("not mountable: %v", err)
+	}
+	s.err = &primitives.MountError{Op: "mount", Dataset: "tank", Mountpoint: "/tank", Err: primitives.ErrMountpointNotEmpty}
+	if err := tank.Mount(); !errors.Is(err, ErrMountpointNotEmpty) {
+		t.Errorf("not empty: %v", err)
+	}
+	s.err = &primitives.MountError{Op: "unmount", Dataset: "tank", Mountpoint: "/tank", Err: syscall.EBUSY}
+	if err := tank.Unmount(); !errors.Is(err, ErrBusy) {
+		t.Errorf("busy: %v", err)
+	}
+	s.err = &primitives.MountError{Op: "mount", Dataset: "tank", Mountpoint: "/tank", Err: primitives.ErrKeyNotLoaded}
+	if err := tank.Mount(); !errors.Is(err, ErrKey) {
+		t.Errorf("key: %v", err)
+	}
+	var oe *OpError
+	if err := tank.Mount(); !errors.As(err, &oe) || oe.Op != "mount" {
+		t.Errorf("err = %v", err)
+	}
+}

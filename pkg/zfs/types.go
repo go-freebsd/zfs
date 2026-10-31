@@ -147,6 +147,14 @@ var (
 	ErrReplicationStream = primitives.ErrCompoundStream
 	// ErrNotAStream is returned for input that is not a ZFS send stream.
 	ErrNotAStream = primitives.ErrNotAStream
+	// ErrNotMountable is matched by the error of mounting a dataset that has
+	// no place to be mounted at: mountpoint none or legacy, canmount off, a
+	// volume, a redacted or jailed dataset.
+	ErrNotMountable = primitives.ErrNotMountable
+	// ErrMountpointNotEmpty is returned when the directory has content and
+	// overlay mounts are off.
+	ErrMountpointNotEmpty = primitives.ErrMountpointNotEmpty
+
 	// ErrStreamTruncated is the kernel's answer to a stream that ends early.
 	ErrStreamTruncated = ioctl.ErrStreamTruncated
 )
@@ -157,3 +165,6 @@ func ReadStreamHeader(r io.Reader) (*StreamHeader, error) { return primitives.Re
 
 // ParseResumeToken decodes a receive_resume_token.
 func ParseResumeToken(token string) (*ResumeToken, error) { return primitives.ParseResumeToken(token) }
+
+// Mount is a mounted ZFS filesystem.
+type Mount = primitives.Mount

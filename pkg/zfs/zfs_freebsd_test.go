@@ -478,7 +478,7 @@ func mountedSource(t *testing.T, pool *Dataset, name string, files map[string]st
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli(t, "zfs", "mount", ds.Name())
+	ensureMounted(t, ds.Name())
 	for f, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -764,7 +764,7 @@ func TestScenarioRedactedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", clone.Name()).Run() })
-	cli(t, "zfs", "mount", clone.Name())
+	ensureMounted(t, clone.Name())
 	os.WriteFile(filepath.Join(cdir, "secret"), []byte("REDACTED"), 0o644)
 	rs, err := clone.Snapshot("r")
 	if err != nil {
@@ -825,3 +825,156 @@ func (w *brokenWriter) Write(p []byte) (int, error) {
 type stuckWriter struct{}
 
 func (stuckWriter) Write(p []byte) (int, error) { time.Sleep(time.Hour); return len(p), nil }
+
+// ensureMounted makes sure the filesystem is mounted: creating one mounts it
+// now, so a "zfs mount" would fail with "already mounted".
+func ensureMounted(t *testing.T, ds string) {
+	t.Helper()
+	exec.Command("zfs", "mount", ds).Run()
+	if got := cli(t, "zfs", "get", "-H", "-o", "value", "mounted", ds); got != "yes" {
+		t.Fatalf("%s is not mounted (%s)", ds, got)
+	}
+}
+
+func TestScenarioMounting(t *testing.T) {
+	c, pool := testClient(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	root, err := pool.CreateFilesystem(scratch(t, pool, "mnt"), WithMountpoint(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Creating mounts, as zfs create does; children inherit the place.
+	kid, err := root.CreateFilesystem("kid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := root.CreateFilesystem("quiet", NoMount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ds, want := range map[string]string{root.Name(): "yes", kid.Name(): "yes", quiet.Name(): "no"} {
+		if got := cli(t, "zfs", "get", "-H", "-o", "value", "mounted", ds); got != want {
+			t.Errorf("%s mounted = %s, want %s", ds, got, want)
+		}
+	}
+	if where, ok, err := kid.IsMounted(); err != nil || !ok || where != filepath.Join(dir, "kid") {
+		t.Errorf("IsMounted = %q %v %v", where, ok, err)
+	}
+	ms, err := c.Mounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, m := range ms {
+		if strings.HasPrefix(m.Dataset, root.Name()) {
+			seen++
+		}
+	}
+	if seen != 2 {
+		t.Errorf("Mounts lists %d of the tree, want 2", seen)
+	}
+
+	if _, err := quiet.MountPoint(); err != nil {
+		t.Errorf("MountPoint: %v", err)
+	}
+	if err := quiet.Mount(); err != nil {
+		t.Fatal(err)
+	}
+	if err := quiet.Mount(); !errors.Is(err, ErrBusy) {
+		t.Errorf("mounting twice: %v", err)
+	}
+	if err := quiet.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+	if err := quiet.Set(WithMountpoint("none")); err != nil {
+		t.Fatal(err)
+	}
+	if err := quiet.Mount(); !errors.Is(err, ErrNotMountable) {
+		t.Errorf("mountpoint none: %v", err)
+	}
+	if _, err := quiet.MountPoint(); !errors.Is(err, ErrNotMountable) {
+		t.Errorf("MountPoint of none: %v", err)
+	}
+
+	// Moving the parent moves the child.
+	moved := t.TempDir()
+	if err := root.Set(WithMountpoint(moved)); err != nil {
+		t.Fatal(err)
+	}
+	if where, _, _ := kid.IsMounted(); where != filepath.Join(moved, "kid") {
+		t.Errorf("after the move: %q", where)
+	}
+
+	// Everything down and up again.
+	if err := root.UnmountAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := root.IsMounted(); ok {
+		t.Error("still mounted")
+	}
+	if err := root.MountAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := kid.IsMounted(); !ok {
+		t.Error("MountAll did not mount the child")
+	}
+
+	// Destroy unmounts first; a file in use makes it fail and leaves the mount.
+	f, err := os.Create(filepath.Join(moved, "kid", "busy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Destroy(Recursive()); !errors.Is(err, ErrBusy) {
+		t.Errorf("destroy with an open file: %v", err)
+	}
+	if _, ok, _ := kid.IsMounted(); !ok {
+		t.Error("the failed destroy left the child unmounted")
+	}
+	if err := root.Destroy(Recursive(), ForceUnmount()); err != nil {
+		t.Fatalf("forced destroy: %v", err)
+	}
+	f.Close()
+	if ok, _ := root.Exists(); ok {
+		t.Error("still there")
+	}
+
+	// Receive mounts, NoMount and DryRun do not, and Exclude is accepted.
+	src := mountedSource(t, pool, "mnt_src", map[string]string{"f": "data"})
+	sa, err := src.Snapshot("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stream bytes.Buffer
+	if err := sa.Send(ctx, &stream); err != nil {
+		t.Fatal(err)
+	}
+	b := stream.Bytes()
+	for name, tc := range map[string]struct {
+		opts    []Option
+		mounted string
+		exists  bool
+	}{
+		"default": {[]Option{WithMountpoint(t.TempDir())}, "yes", true},
+		"NoMount": {[]Option{WithMountpoint(t.TempDir()), NoMount()}, "no", true},
+		"DryRun":  {[]Option{DryRun()}, "", false},
+		"Exclude": {[]Option{WithMountpoint(t.TempDir()), Exclude("compression")}, "yes", true},
+	} {
+		dst := c.Dataset(pool.Name() + "/" + scratch(t, pool, "mnt_dst_"+name))
+		got, err := dst.Receive(ctx, bytes.NewReader(b), tc.opts...)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ok, _ := dst.Exists(); ok != tc.exists {
+			t.Errorf("%s: exists = %v", name, ok)
+		}
+		if tc.exists {
+			if m := cli(t, "zfs", "get", "-H", "-o", "value", "mounted", dst.Name()); m != tc.mounted {
+				t.Errorf("%s: mounted = %s, want %s", name, m, tc.mounted)
+			}
+		}
+		if name == "DryRun" && (len(got) != 1 || !got[0].DryRun || got[0].Bytes != uint64(len(b))) {
+			t.Errorf("DryRun result = %+v", got)
+		}
+	}
+}

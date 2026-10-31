@@ -42,6 +42,14 @@ type backend interface {
 	ResumeToken(dataset string) (string, bool, error)
 	AbortResume(dataset string) error
 
+	Mounts() ([]primitives.Mount, error)
+	IsMounted(dataset string) (string, bool, error)
+	MountPoint(dataset string) (string, error)
+	Mount(dataset string, o *primitives.MountOptions) error
+	Unmount(dataset string, o *primitives.UnmountOptions) error
+	MountAll(root string, o *primitives.MountOptions) error
+	UnmountAll(root string, o *primitives.UnmountOptions) error
+
 	LoadKey(dataset string, key *primitives.Key) error
 	CheckKey(dataset string, key *primitives.Key) error
 	UnloadKey(dataset string) error

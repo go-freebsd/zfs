@@ -21,6 +21,8 @@ const (
 	scSnapshotAll
 	scSend
 	scReceive
+	scMount
+	scUnmount
 
 	scProps = scCreate | scSet | scClone | scReceive // a regular property
 	scUser  = scProps | scSnapshot | scSnapshotAll
@@ -45,8 +47,13 @@ type config struct {
 	depth     int
 	types     Kind
 
-	send primitives.SendOptions
-	recv primitives.ReceiveOptions
+	noMount      bool
+	forceUnmount bool
+
+	send    primitives.SendOptions
+	recv    primitives.ReceiveOptions
+	mount   primitives.MountOptions
+	unmount primitives.UnmountOptions
 }
 
 func collect(op string, sc scope, opts []Option) (*config, error) {
@@ -64,7 +71,7 @@ func collect(op string, sc scope, opts []Option) (*config, error) {
 }
 
 func (c *config) create() *primitives.CreateOptions {
-	return &primitives.CreateOptions{Props: c.props, Key: c.key, Parents: c.parents}
+	return &primitives.CreateOptions{Props: c.props, Key: c.key, Parents: c.parents, NoMount: c.noMount}
 }
 
 func (c *config) sendOpts() *primitives.SendOptions {
@@ -76,6 +83,18 @@ func (c *config) recvOpts() *primitives.ReceiveOptions {
 	o := c.recv
 	o.Props = c.props
 	o.Parents = c.parents
+	o.NoMount = c.noMount
+	return &o
+}
+
+func (c *config) mountOpts() *primitives.MountOptions {
+	o := c.mount
+	return &o
+}
+
+func (c *config) unmountOpts() *primitives.UnmountOptions {
+	o := c.unmount
+	o.Force = c.forceUnmount
 	return &o
 }
 
@@ -161,7 +180,20 @@ func WithEncryption(alg Algorithm, key *Key) Option {
 	}}
 }
 
+// NoMount leaves a filesystem unmounted. Create, Clone and Receive mount
+// what they made (when its mountpoint is a path and canmount is on), as the
+// zfs commands do; this is zfs receive -u and zfs create -u.
+func NoMount() Option {
+	return Option{name: "NoMount", scope: scCreate | scClone | scReceive, apply: func(c *config) { c.noMount = true }}
+}
+
 // Destroy options.
+
+// ForceUnmount unmounts busy filesystems first (zfs destroy -f, unmount -f).
+// Without it a busy mount makes the call fail with ErrBusy.
+func ForceUnmount() Option {
+	return Option{name: "ForceUnmount", scope: scDestroyDataset | scUnmount, apply: func(c *config) { c.forceUnmount = true }}
+}
 
 // Recursive destroys the descendants and snapshots of a dataset too.
 func Recursive() Option {
@@ -283,8 +315,58 @@ func DiscardPool() Option {
 	return Option{name: "DiscardPool", scope: scReceive, apply: func(c *config) { c.recv.Layout = primitives.LayoutDiscardPool }}
 }
 
+// Exclude names properties that the stream must not set (zfs receive -x):
+// they are inherited on the target instead. A plain stream carries no
+// properties, so this changes something only for a target that already
+// holds received values; see primitives.ReceiveOptions.Exclude.
+func Exclude(props ...string) Option {
+	return Option{name: "Exclude", scope: scReceive, apply: func(c *config) { c.recv.Exclude = append(c.recv.Exclude, props...) }}
+}
+
+// DryRun checks the stream and where it would go and reads it to its end,
+// but receives and mounts nothing (zfs receive -n). The Received values have
+// DryRun set. See primitives.ReceiveOptions.DryRun for what is checked.
+func DryRun() Option {
+	return Option{name: "DryRun", scope: scReceive, apply: func(c *config) { c.recv.DryRun = true }}
+}
+
 // LastElement keeps only the last element of the dataset path in the stream
 // (zfs receive -e).
 func LastElement() Option {
 	return Option{name: "LastElement", scope: scReceive, apply: func(c *config) { c.recv.Layout = primitives.LayoutLastElement }}
+}
+
+// Mount options.
+
+// Overlay allows mounting over a directory that has content (zfs mount -O).
+func Overlay() Option {
+	return Option{name: "Overlay", scope: scMount, apply: func(c *config) { c.mount.Overlay = true }}
+}
+
+// Remount updates an existing mount (zfs mount -o remount).
+func Remount() Option {
+	return Option{name: "Remount", scope: scMount, apply: func(c *config) { c.mount.Remount = true }}
+}
+
+// WithMountOptions replaces the default mount options ("defaults"); the
+// options the properties imply are still added.
+func WithMountOptions(opts ...string) Option {
+	return Option{name: "WithMountOptions", scope: scMount, apply: func(c *config) { c.mount.Options = append(c.mount.Options, opts...) }}
+}
+
+// WithMountKey loads the key first if the dataset is encrypted and its key
+// is not loaded (zfs mount -l).
+func WithMountKey(key *Key) Option {
+	return Option{name: "WithMountKey", scope: scMount, apply: func(c *config) { c.mount.Key = key }}
+}
+
+// MountRedacted also mounts a redacted dataset (zfs mount -f).
+func MountRedacted() Option {
+	return Option{name: "MountRedacted", scope: scMount, apply: func(c *config) { c.mount.Force = true }}
+}
+
+// AndUnloadKey also unloads the key of an encryption root after unmounting
+// it (zfs unmount -u).
+func AndUnloadKey() Option {
+	return Option{name: "AndUnloadKey", scope: scUnmount, apply: func(c *config) { c.unmount.UnloadKey = true }}
 }

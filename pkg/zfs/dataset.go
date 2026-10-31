@@ -57,7 +57,9 @@ func (d *Dataset) Info() (*Info, error) {
 
 // CreateFilesystem creates a filesystem below d and returns its handle.
 // name is relative to d and may have several components with Parents().
-// The filesystem is not mounted; the kernel only creates it.
+// A filesystem that is mountable (see MountPoint) is mounted, unless
+// NoMount is given; if only the mount fails the error is a mount error and
+// the filesystem exists.
 func (d *Dataset) CreateFilesystem(name string, opts ...Option) (*Dataset, error) {
 	cfg, err := collect("create", scCreate, opts)
 	if err != nil {
@@ -190,7 +192,7 @@ func (d *Dataset) Destroy(opts ...Option) error {
 	if err != nil {
 		return wrap("destroy", d.name, err)
 	}
-	return wrap("destroy", d.name, d.c.b.Destroy(d.name, &primitives.DestroyOptions{Recursive: cfg.recursive}))
+	return wrap("destroy", d.name, d.c.b.Destroy(d.name, &primitives.DestroyOptions{Recursive: cfg.recursive, Force: cfg.forceUnmount}))
 }
 
 // Rename renames the dataset. newName is the full new name, which may be
@@ -201,6 +203,61 @@ func (d *Dataset) Rename(newName string) (*Dataset, error) {
 		return nil, wrap("rename", d.name, err)
 	}
 	return d.c.Dataset(newName), nil
+}
+
+// Mount mounts the filesystem at its mountpoint (zfs mount). A dataset that
+// has no mountpoint to mount at fails with ErrNotMountable; one that is
+// mounted fails with ErrBusy unless Remount is given.
+func (d *Dataset) Mount(opts ...Option) error {
+	cfg, err := collect("mount", scMount, opts)
+	if err != nil {
+		return wrap("mount", d.name, err)
+	}
+	return wrapMount("mount", d.name, d.c.b.Mount(d.name, cfg.mountOpts()))
+}
+
+// Unmount unmounts the filesystem. One that is not mounted is not an error.
+func (d *Dataset) Unmount(opts ...Option) error {
+	cfg, err := collect("unmount", scUnmount, opts)
+	if err != nil {
+		return wrap("unmount", d.name, err)
+	}
+	return wrap("unmount", d.name, d.c.b.Unmount(d.name, cfg.unmountOpts()))
+}
+
+// IsMounted reports whether the filesystem is mounted, and where.
+func (d *Dataset) IsMounted() (where string, mounted bool, err error) {
+	where, mounted, err = d.c.b.IsMounted(d.name)
+	return where, mounted, wrap("ismounted", d.name, err)
+}
+
+// MountPoint is where the filesystem is, or would be, mounted. It fails
+// with ErrNotMountable if the mountpoint is none or legacy, canmount is off,
+// or the dataset is not a filesystem.
+func (d *Dataset) MountPoint() (string, error) {
+	p, err := d.c.b.MountPoint(d.name)
+	return p, wrap("mountpoint", d.name, err)
+}
+
+// MountAll mounts the filesystems at and below d that are mountable and not
+// mounted yet, parents first (zfs mount -a). Failures are joined; the rest
+// is still mounted.
+func (d *Dataset) MountAll(opts ...Option) error {
+	cfg, err := collect("mount all", scMount, opts)
+	if err != nil {
+		return wrap("mount all", d.name, err)
+	}
+	return wrapMount("mount all", d.name, d.c.b.MountAll(d.name, cfg.mountOpts()))
+}
+
+// UnmountAll unmounts the filesystems at and below d, children first
+// (zfs unmount -a).
+func (d *Dataset) UnmountAll(opts ...Option) error {
+	cfg, err := collect("unmount all", scUnmount, opts)
+	if err != nil {
+		return wrap("unmount all", d.name, err)
+	}
+	return wrap("unmount all", d.name, d.c.b.UnmountAll(d.name, cfg.unmountOpts()))
 }
 
 // Promote makes a clone independent of its origin: the origin snapshot and

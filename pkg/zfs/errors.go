@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"syscall"
+
+	"github.com/go-freebsd/zfs/pkg/primitives"
 )
 
 // Errors to test with errors.Is. The kernel's errors map onto them, so a
@@ -49,4 +51,12 @@ func wrapKey(op, name string, err error) error {
 		return nil
 	}
 	return &OpError{Op: op, Name: name, Err: fmt.Errorf("%w: %w", ErrKey, err)}
+}
+
+// wrapMount is wrap, and a missing key counts as ErrKey.
+func wrapMount(op, name string, err error) error {
+	if errors.Is(err, primitives.ErrKeyNotLoaded) {
+		return &OpError{Op: op, Name: name, Err: fmt.Errorf("%w: %w", ErrKey, err)}
+	}
+	return wrap(op, name, err)
 }

@@ -14,16 +14,18 @@ type stub struct {
 	calls []string // "Method arg arg ..."
 
 	// recorded arguments of the last call of each kind
-	createOpts *primitives.CreateOptions
-	setProps   map[string]any
-	snapNames  []string
-	snapProps  map[string]any
-	destroyOpt *primitives.DestroyOptions
-	key        *primitives.Key
-	sendOpts   *primitives.SendOptions
-	recvOpts   *primitives.ReceiveOptions
-	writer     io.Writer
-	token      string
+	createOpts  *primitives.CreateOptions
+	setProps    map[string]any
+	snapNames   []string
+	snapProps   map[string]any
+	destroyOpt  *primitives.DestroyOptions
+	key         *primitives.Key
+	sendOpts    *primitives.SendOptions
+	recvOpts    *primitives.ReceiveOptions
+	mountOpts   *primitives.MountOptions
+	unmountOpts *primitives.UnmountOptions
+	writer      io.Writer
+	token       string
 
 	// answers
 	err      error                 // returned by every call when set
@@ -171,3 +173,27 @@ func (s *stub) ResumeToken(ds string) (string, bool, error) {
 	return s.token, s.token != "", s.rec("ResumeToken", ds)
 }
 func (s *stub) AbortResume(ds string) error { return s.rec("AbortResume", ds) }
+
+func (s *stub) Mounts() ([]primitives.Mount, error) {
+	return []primitives.Mount{{Dataset: "tank/a", Mountpoint: "/tank/a"}}, s.rec("Mounts")
+}
+func (s *stub) IsMounted(ds string) (string, bool, error) {
+	return "/" + ds, true, s.rec("IsMounted", ds)
+}
+func (s *stub) MountPoint(ds string) (string, error) { return "/" + ds, s.rec("MountPoint", ds) }
+func (s *stub) Mount(ds string, o *primitives.MountOptions) error {
+	s.mountOpts = o
+	return s.rec("Mount", ds)
+}
+func (s *stub) Unmount(ds string, o *primitives.UnmountOptions) error {
+	s.unmountOpts = o
+	return s.rec("Unmount", ds)
+}
+func (s *stub) MountAll(ds string, o *primitives.MountOptions) error {
+	s.mountOpts = o
+	return s.rec("MountAll", ds)
+}
+func (s *stub) UnmountAll(ds string, o *primitives.UnmountOptions) error {
+	s.unmountOpts = o
+	return s.rec("UnmountAll", ds)
+}
