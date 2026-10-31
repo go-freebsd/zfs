@@ -149,8 +149,15 @@ streams and, like `zfs send -n`, counts the first stream of a clone as a full on
 wrote the plain streams one after the other; `Receive` takes both). A replication stream
 whose stream for a child lacks the child's base snapshot (dropped from the middle) is an
 error here; `zfs receive` exits 0 and leaves the child out. The header is limited
-to 128 MiB. Not done: `send -b`, resuming a replication stream, redacted `-R`, `receive -o`
-per dataset. `ErrReplicationStream` is no longer returned.
+to 128 MiB. Not done: `send -b`, `receive -o` per dataset. `ErrReplicationStream` is no longer
+returned.
+
+Not possible, because `zfs` refuses them too (`ErrIncompatibleOptions`, before anything is
+sent): a resumed, saved or redacted replication stream (`Replicate`/`Intermediates`/`Props`/
+`Holds` with `ResumeSend`, `Saved` or `RedactedWith`), and a raw redacted stream. A
+replication stream that was cut off is finished the way the CLI does it: receive with
+`Resumable()`, resume the stream each leftover token names (`ResumeSend`), then send the
+whole `-R` again; what exists is skipped.
 
 `Heal` is passed to the kernel but is not tested against a corrupted pool.
 

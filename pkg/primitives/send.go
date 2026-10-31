@@ -150,6 +150,11 @@ func (c *Client) SendFD(snapshot string, fd int, o *SendOptions) error {
 // (zfs send -n). The flags of o change the answer: a compressed stream is
 // smaller.
 func (c *Client) SendSize(snapshot string, o *SendOptions) (uint64, error) {
+	if o != nil {
+		if err := o.check(); err != nil {
+			return 0, err
+		}
+	}
 	if o != nil && (o.Replicate || o.Props || o.Holds || o.Intermediates) {
 		return c.sendPackageSize(snapshot, o)
 	}
@@ -212,6 +217,28 @@ func (c *Client) Redact(snapshot, bookmark string, redactionSnapshots []string) 
 	return err
 }
 
+// ErrIncompatibleOptions is returned, before anything is sent, for a
+// combination of send options that zfs send refuses as well: a replication
+// stream (Replicate, Intermediates) cannot be redacted, resumed or saved, and
+// a raw stream cannot be redacted.
+var ErrIncompatibleOptions = errors.New("zfs: send: incompatible options")
+
+// check rejects the combinations zfs_do_send does (cmd/zfs/zfs_main.c).
+func (o *SendOptions) check() error {
+	pkg := o.Replicate || o.Props || o.Holds || o.Intermediates
+	switch {
+	case o.Saved && pkg:
+		return fmt.Errorf("%w: a saved send cannot be combined with Replicate, Props, Holds or Intermediates", ErrIncompatibleOptions)
+	case (o.ResumeObject != 0 || o.ResumeOffset != 0) && pkg:
+		return fmt.Errorf("%w: a resumed send cannot be combined with Replicate, Props, Holds or Intermediates", ErrIncompatibleOptions)
+	case o.RedactBookmark != "" && (o.Replicate || o.Intermediates):
+		return fmt.Errorf("%w: multiple snapshots cannot be sent redacted", ErrIncompatibleOptions)
+	case o.RedactBookmark != "" && o.Raw:
+		return fmt.Errorf("%w: raw sends may not be redacted", ErrIncompatibleOptions)
+	}
+	return nil
+}
+
 // Send writes the stream of a snapshot to w. If w is an *os.File its
 // descriptor is handed to the kernel directly (and made blocking). Any other
 // writer is fed through a pipe by a goroutine; an error from w ends the send.
@@ -222,6 +249,9 @@ func (c *Client) Redact(snapshot, bookmark string, redactionSnapshots []string) 
 func (c *Client) Send(ctx context.Context, snapshot string, w io.Writer, o *SendOptions) error {
 	if o == nil {
 		o = &SendOptions{}
+	}
+	if err := o.check(); err != nil {
+		return err
 	}
 	if o.Replicate || o.Props || o.Holds || o.Intermediates {
 		return c.sendPackage(ctx, snapshot, w, o)
@@ -336,6 +366,12 @@ func (c *Client) watchProgress(snapshot string, fd int, o *SendOptions) (stop fu
 // from the token; o may add others and set Progress. The snapshot is found
 // by its GUID, like zfs does, so it may have been renamed.
 func (c *Client) ResumeSend(ctx context.Context, w io.Writer, token string, o *SendOptions) error {
+	if o != nil {
+		// zfs send -t takes no other stream-shaping flag: the token says it all.
+		if o.From != "" || o.Replicate || o.Props || o.Holds || o.Intermediates || o.RedactBookmark != "" {
+			return fmt.Errorf("%w: a resumed send takes its shape from the token", ErrIncompatibleOptions)
+		}
+	}
 	t, err := ParseResumeToken(token)
 	if err != nil {
 		return err

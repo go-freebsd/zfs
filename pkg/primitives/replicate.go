@@ -109,8 +109,11 @@ func (c *Client) newReplSend(snapshot string, o *SendOptions) (*replSend, error)
 	} else if o.Intermediates {
 		return nil, errors.New("zfs: send: intermediates need From to be a snapshot")
 	}
-	if o.Saved || o.ResumeObject != 0 || o.ResumeOffset != 0 || o.RedactBookmark != "" {
-		return nil, errors.New("zfs: send: Saved, Resume and Redact cannot be combined with Replicate, Props, Holds or Intermediates")
+	if err := o.check(); err != nil {
+		return nil, err
+	}
+	if o.RedactBookmark != "" {
+		return nil, fmt.Errorf("%w: a stream with Props or Holds cannot be redacted here", ErrIncompatibleOptions)
 	}
 	return r, nil
 }

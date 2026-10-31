@@ -155,6 +155,10 @@ var (
 	// stream was received, when the target could not be brought in line with
 	// the sender: something to destroy, rename or promote was left.
 	ErrPartialReceive = primitives.ErrPartialReceive
+	// ErrIncompatibleOptions is returned, before anything is sent, for send
+	// options that zfs send refuses together (a redacted or resumed
+	// replication stream, a redacted raw stream).
+	ErrIncompatibleOptions = primitives.ErrIncompatibleOptions
 	// ErrSendIncomplete is returned, after the stream was written, when some
 	// datasets or snapshots could not be sent; the stream holds the rest.
 	ErrSendIncomplete = primitives.ErrSendIncomplete

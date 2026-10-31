@@ -1001,3 +1001,108 @@ func TestReplicationHeaderCutDamagedAndReordered(t *testing.T) {
 		}
 	})
 }
+
+// tokensBelow lists the datasets under root that hold a receive_resume_token.
+func tokensBelow(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, r := range rows(cli(t, "zfs", "get", "-r", "-H", "-o", "name,value", "receive_resume_token", root)) {
+		if len(r) == 2 && r[1] != "-" {
+			out[strings.ReplaceAll(r[0], root, "ROOT")] = r[1]
+		}
+	}
+	return out
+}
+
+// zfs refuses to resume or to redact a replication stream, so the way to
+// finish an interrupted -R is: resume the one stream the token names, then
+// send the whole -R again. The library does the same as the CLI at each step.
+func TestReplicationResumesLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src := bigTree(t, pool, "pr_src")
+	full := theirs(t, "-R", src+"@b")
+
+	var cut int
+	var ref string
+	for _, frac := range [][2]int{{1, 2}, {3, 5}, {2, 5}, {3, 4}, {1, 3}} {
+		cut = len(full) * frac[0] / frac[1]
+		ref = wds(t, pool, "pr_ref")
+		cmd := exec.Command("zfs", "receive", "-s", "-u", ref)
+		cmd.Stdin = bytes.NewReader(full[:cut])
+		if cmd.Run() == nil {
+			t.Fatalf("zfs receive accepted a stream cut at %d", cut)
+		}
+		if len(tokensBelow(t, ref)) > 0 {
+			break
+		}
+		cli(t, "zfs", "destroy", "-rR", ref)
+		ref = ""
+	}
+	if ref == "" {
+		t.Skip("no cut of the stream left a resume token with this zfs")
+	}
+	defer func() { releaseAll(ref); exec.Command("zfs", "destroy", "-rR", ref).Run() }()
+
+	mine := wds(t, pool, "pr_mine")
+	_, err := c.Receive(context.Background(), bytes.NewReader(full[:cut]), mine, &ReceiveOptions{NoMount: true, Resumable: true})
+	if err == nil {
+		t.Fatal("a cut stream was received without an error")
+	}
+	defer func() { releaseAll(mine); exec.Command("zfs", "destroy", "-rR", mine).Run() }()
+
+	refTok, myTok := tokensBelow(t, ref), tokensBelow(t, mine)
+	if len(refTok) != len(myTok) {
+		t.Fatalf("tokens differ: zfs receive %v, here %v", refTok, myTok)
+	}
+	for name, tok := range refTok {
+		if _, ok := myTok[name]; !ok {
+			t.Fatalf("zfs receive left a token on %s, we did not: %v", name, myTok)
+		}
+		a, err1 := ParseResumeToken(tok)
+		b, err2 := ParseResumeToken(myTok[name])
+		if err1 != nil || err2 != nil || a.ToName != b.ToName || a.Object != b.Object || a.Offset != b.Offset {
+			t.Errorf("%s: token %+v / %+v (%v %v)", name, a, b, err1, err2)
+		}
+	}
+
+	// The CLI's token resumes in both worlds; each side resumes its own.
+	for name, tok := range refTok {
+		ds := strings.ReplaceAll(name, "ROOT", ref)
+		send := exec.Command("zfs", "send", "-t", tok)
+		recv := exec.Command("zfs", "receive", "-s", "-u", ds)
+		pipe, _ := send.StdoutPipe()
+		recv.Stdin = pipe
+		send.Start()
+		if err := recv.Run(); err != nil {
+			t.Fatalf("zfs: resuming %s: %v", ds, err)
+		}
+		send.Wait()
+	}
+	for name, tok := range myTok {
+		ds := strings.ReplaceAll(name, "ROOT", mine)
+		pr, pw := io.Pipe()
+		go func() { pw.CloseWithError(c.ResumeSend(context.Background(), pw, tok, nil)) }()
+		if _, err := c.Receive(context.Background(), pr, ds, &ReceiveOptions{NoMount: true, Resumable: true}); err != nil {
+			t.Fatalf("here: resuming %s: %v", ds, err)
+		}
+	}
+	if a, b := tokensBelow(t, ref), tokensBelow(t, mine); len(a) != 0 || len(b) != 0 {
+		t.Errorf("tokens left after the resume: %v / %v", a, b)
+	}
+
+	// Then the whole -R again: what exists is skipped, the rest arrives.
+	zfsRecv := exec.Command("zfs", "receive", "-s", "-u", "-F", ref)
+	zfsRecv.Stdin = bytes.NewReader(full)
+	if out, err := zfsRecv.CombinedOutput(); err != nil {
+		t.Fatalf("zfs receive of the whole stream: %v\n%s", err, out)
+	}
+	if _, err := c.Receive(context.Background(), bytes.NewReader(full), mine, &ReceiveOptions{NoMount: true, Resumable: true, Force: true}); err != nil {
+		t.Fatalf("Receive of the whole stream: %v", err)
+	}
+	sameTrees(t, "after resume and resend", ref, mine)
+	for _, d := range []string{ref, mine} {
+		if got, want := namesBelow(t, d), namesBelow(t, src); got != want {
+			t.Errorf("%s does not equal the source\n%s\nsource:\n%s", d, got, want)
+		}
+	}
+}
