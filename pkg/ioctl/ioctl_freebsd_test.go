@@ -160,18 +160,24 @@ func TestIoctlNumbersKnownAnswers(t *testing.T) {
 	}
 }
 
-func TestNoPreemptBlocksSIGURGOnlyForTheCall(t *testing.T) {
+func TestNoPreemptBlocksAsyncSignalsOnlyForTheCall(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if threadSignalBlocked() {
-		t.Skip("SIGURG is blocked to begin with")
+	for _, sig := range []int{sigURG, sigCHLD} {
+		if threadSignalBlocked(sig) {
+			t.Skipf("signal %d is blocked to begin with", sig)
+		}
 	}
 	done := noPreempt()
-	if !threadSignalBlocked() {
-		t.Error("SIGURG is not blocked during the call")
+	for _, sig := range []int{sigURG, sigCHLD} {
+		if !threadSignalBlocked(sig) {
+			t.Errorf("signal %d is not blocked during the call", sig)
+		}
 	}
 	done()
-	if threadSignalBlocked() {
-		t.Error("SIGURG stays blocked after the call")
+	for _, sig := range []int{sigURG, sigCHLD} {
+		if threadSignalBlocked(sig) {
+			t.Errorf("signal %d stays blocked after the call", sig)
+		}
 	}
 }

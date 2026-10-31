@@ -45,17 +45,27 @@ func sysIoctl(fd int) ioctlFunc {
 
 const (
 	sigURG      = 16 // the signal Go uses to preempt a goroutine
+	sigCHLD     = 20 // a child process ended: zfs send, as the other end of a pipe
 	sigBlock    = 1  // SIG_BLOCK
 	sigSetMask  = 3  // SIG_SETMASK
 	sigsetWords = 4  // _SIG_WORDS
 )
 
-// noPreempt blocks SIGURG on the calling thread, which stays the goroutine's
+// asyncSignals are the signals that arrive for the process as a whole and
+// would be delivered to a thread that is waiting in the kernel, which then
+// returns EINTR from a call that cannot be repeated. Blocked on that one
+// thread they are delivered to another one.
+var asyncSignals = []int{1, 2, 3, 14, 15, sigURG, sigCHLD, 23, 26, 27, 28, 30, 31}
+
+// noPreempt blocks the asynchronous signals (SIGURG, which Go preempts with,
+// and SIGCHLD above all) on the calling thread, which stays the goroutine's
 // thread until the returned function restores the mask. See Conn.DoOnce.
 func noPreempt() func() {
 	runtime.LockOSThread()
 	var set, old [sigsetWords]uint32
-	set[(sigURG-1)/32] = 1 << ((sigURG - 1) % 32)
+	for _, sig := range asyncSignals {
+		set[(sig-1)/32] |= 1 << ((sig - 1) % 32)
+	}
 	if _, _, e := syscall.RawSyscall(syscall.SYS_SIGPROCMASK, sigBlock, uintptr(unsafe.Pointer(&set[0])), uintptr(unsafe.Pointer(&old[0]))); e != 0 {
 		runtime.UnlockOSThread()
 		return func() {}
@@ -66,9 +76,10 @@ func noPreempt() func() {
 	}
 }
 
-// threadSignalBlocked reports whether SIGURG is blocked on the calling thread.
-func threadSignalBlocked() bool {
+// threadSignalBlocked reports whether the signal is blocked on the calling
+// thread.
+func threadSignalBlocked(sig int) bool {
 	var cur [sigsetWords]uint32
 	syscall.RawSyscall(syscall.SYS_SIGPROCMASK, sigBlock, 0, uintptr(unsafe.Pointer(&cur[0])))
-	return cur[(sigURG-1)/32]&(1<<((sigURG-1)%32)) != 0
+	return cur[(sig-1)/32]&(1<<((sig-1)%32)) != 0
 }

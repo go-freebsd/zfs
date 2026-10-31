@@ -784,7 +784,7 @@ func TestReplicationCancel(t *testing.T) {
 	})
 }
 
-// A target that was changed since the base snapshot refuses an incremental
+// A target that was written to since the base snapshot refuses an incremental
 // replication stream, and takes it with Force by rolling back: the same for
 // zfs receive and for this library, with the stream coming from a process.
 func TestReplicationForceOnADivergedTarget(t *testing.T) {
@@ -798,7 +798,14 @@ func TestReplicationForceOnADivergedTarget(t *testing.T) {
 		ref, mine := wds(t, pool, "pf_ref"), wds(t, pool, "pf_mine")
 		for _, d := range []string{ref, mine} {
 			zreceive(t, base, "-u", d)
-			cli(t, "zfs", "snapshot", d+"@local") // newer than the base: the target diverged
+			// Written to since the base snapshot: the target diverged.
+			dir := tdir(t)
+			cli(t, "zfs", "set", "mountpoint="+dir, d)
+			cli(t, "zfs", "mount", d)
+			if err := os.WriteFile(filepath.Join(dir, "local"), []byte("not in the stream"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cli(t, "zfs", "unmount", d)
 		}
 		args := []string{"-u"}
 		if force {
@@ -824,9 +831,8 @@ func TestReplicationForceOnADivergedTarget(t *testing.T) {
 		if a, b := namesBelow(t, ref), namesBelow(t, mine); a != b {
 			t.Errorf("force=%v: trees differ\nzfs receive:\n%s\nhere:\n%s", force, a, b)
 		}
-		hasLocal := strings.Contains(namesBelow(t, mine), "@local")
-		if force && (hasLocal || mineErr != nil) {
-			t.Errorf("force: the local snapshot survived (%v) or the receive failed: %v", hasLocal, mineErr)
+		if force && mineErr != nil {
+			t.Errorf("force: the receive failed: %v", mineErr)
 		}
 		if !force && mineErr == nil {
 			t.Error("without force: a diverged target accepted the stream")
