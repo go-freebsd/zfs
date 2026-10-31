@@ -508,7 +508,7 @@ func TestReceiveOptionsOnARealKernel(t *testing.T) {
 	}
 }
 
-func TestReceiveRefusesReplicationStreams(t *testing.T) {
+func TestReceiveTakesReplicationStreams(t *testing.T) {
 	c, pool := testClient(t)
 	src, _ := source(t, c, pool, "rep_src", nil, map[string]string{"a": "1"})
 	snap(t, c, src+"@a")
@@ -519,12 +519,14 @@ func TestReceiveRefusesReplicationStreams(t *testing.T) {
 			t.Fatalf("zfs send %v: header %+v %v", args, h, err)
 		}
 		dst := wds(t, pool, "rep_dst")
-		if _, err := c.Receive(context.Background(), bytes.NewReader(stream), dst, nil); !errors.Is(err, ErrCompoundStream) {
-			t.Errorf("zfs send %v: %v", args, err)
+		got, err := c.Receive(context.Background(), bytes.NewReader(stream), dst, &ReceiveOptions{NoMount: true})
+		if err != nil || len(got) != 1 {
+			t.Fatalf("zfs send %v: %d streams, %v", args, len(got), err)
 		}
-		if ok, _ := c.Exists(dst); ok {
-			t.Errorf("%v: a dataset was created from a refused stream", args)
+		if guid(t, dst+"@a") != guid(t, src+"@a") {
+			t.Errorf("%v: the snapshot differs", args)
 		}
+		cli(t, "zfs", "destroy", "-r", dst)
 	}
 }
 

@@ -154,19 +154,29 @@ func TestReceiveReplicationStreamsLikeZfs(t *testing.T) {
 	cli(t, "zfs", "hold", "keep", src+"@a", src+"/kid@a")
 	t.Cleanup(func() { exec.Command("zfs", "release", "-r", "keep", src+"@a", src+"/kid@a").Run() })
 
-	for name, args := range map[string][]string{
-		"-R":    {"-R", src + "@b"},
-		"-p":    {"-p", src + "@b"},
-		"-p -i": {"-p", "-i", src + "@a", src + "@b"},
-		"-I":    {"-I", "@a", src + "@b"},
-		"-Rh":   {"-R", "-h", src + "@b"},
-		"-RI":   {"-R", "-I", "@a", src + "@b"},
+	baseStream := theirs(t, "-R", src+"@a")
+	for name, c1 := range map[string]struct {
+		args []string
+		base bool // an incremental stream: the targets get @a first
+	}{
+		"-R":  {[]string{"-R", src + "@b"}, false},
+		"-p":  {[]string{"-p", src + "@b"}, false},
+		"-I":  {[]string{"-I", "@a", src + "@b"}, true},
+		"-Rh": {[]string{"-R", "-h", src + "@b"}, false},
+		"-RI": {[]string{"-R", "-I", "@a", src + "@b"}, true},
+		"-Ri": {[]string{"-R", "-i", "@a", src + "@b"}, true},
 	} {
-		stream := theirs(t, append([]string{}, args...)...)
+		stream := theirs(t, c1.args...)
 		ref := wds(t, pool, "rr_ref")
-		zreceive(t, stream, "-u", ref)
-
 		mine := wds(t, pool, "rr_mine")
+		t.Cleanup(func() { releaseAll(ref); releaseAll(mine) }) // held snapshots keep a dataset alive
+		if c1.base {
+			zreceive(t, baseStream, "-u", ref)
+			if _, err := c.Receive(context.Background(), bytes.NewReader(baseStream), mine, &ReceiveOptions{NoMount: true}); err != nil {
+				t.Fatalf("%s: base: %v", name, err)
+			}
+		}
+		zreceive(t, stream, "-u", ref)
 		got, err := c.Receive(context.Background(), bytes.NewReader(stream), mine, &ReceiveOptions{NoMount: true})
 		if err != nil {
 			t.Fatalf("%s: %v (received %d streams)", name, err, len(got))
@@ -176,7 +186,22 @@ func TestReceiveReplicationStreamsLikeZfs(t *testing.T) {
 		}
 		sameTrees(t, name, ref, mine)
 		t.Logf("%s: %d streams, %d facts", name, len(got), len(treeState(t, mine)))
+		releaseAll(ref)
+		releaseAll(mine)
 		cli(t, "zfs", "destroy", "-rR", ref)
 		cli(t, "zfs", "destroy", "-rR", mine)
+	}
+}
+
+// releaseAll drops every hold below root.
+func releaseAll(root string) {
+	out, err := exec.Command("zfs", "holds", "-rH", root).Output()
+	if err != nil {
+		return
+	}
+	for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if f := strings.Split(l, "\t"); len(f) >= 2 {
+			exec.Command("zfs", "release", f[1], f[0]).Run()
+		}
 	}
 }

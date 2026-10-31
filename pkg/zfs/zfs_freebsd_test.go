@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -626,18 +627,25 @@ func TestScenarioSendIntermediatesAndReplicationStreams(t *testing.T) {
 		}
 	}
 
-	// What zfs send -I and -R write is refused, and nothing is created.
-	for _, args := range [][]string{{"-I", snaps[0].Name(), snaps[3].Name()}, {"-R", snaps[0].Name()}} {
+	// What zfs send -I and -R write is received too.
+	for i, args := range [][]string{{"-I", snaps[0].Name(), snaps[3].Name()}, {"-R", snaps[3].Name()}} {
 		out, err := exec.Command("zfs", append([]string{"send"}, args...)...).Output()
 		if err != nil {
 			t.Fatalf("zfs send %v: %v", args, err)
 		}
-		target := pool.Child("im_refused")
-		if _, err := target.Receive(ctx, bytes.NewReader(out)); !errors.Is(err, ErrReplicationStream) {
-			t.Errorf("zfs send %v: %v", args, err)
+		target := pool.Child(fmt.Sprintf("im_repl%d", i))
+		t.Cleanup(func() { exec.Command("zfs", "destroy", "-rR", target.Name()).Run() })
+		if i == 0 { // an incremental stream needs its base
+			if _, err := target.Receive(ctx, bytes.NewReader(mustSend(t, ctx, snaps[0]))); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if ok, _ := target.Exists(); ok {
-			t.Error("a dataset was made from a refused stream")
+		got, err := target.Receive(ctx, bytes.NewReader(out))
+		if err != nil || len(got) == 0 {
+			t.Errorf("zfs send %v: %d streams, %v", args, len(got), err)
+		}
+		if guidOf(t, target.Name()+"@"+snaps[3].ShortName()) != guidOf(t, snaps[3].Name()) {
+			t.Errorf("zfs send %v: the last snapshot differs", args)
 		}
 	}
 	// And garbage is not a stream.
@@ -977,4 +985,13 @@ func TestScenarioMounting(t *testing.T) {
 			t.Errorf("DryRun result = %+v", got)
 		}
 	}
+}
+
+func mustSend(t *testing.T, ctx context.Context, s *Snapshot) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := s.Send(ctx, &b); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
 }
