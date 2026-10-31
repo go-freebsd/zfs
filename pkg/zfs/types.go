@@ -151,6 +151,10 @@ var (
 	// header is damaged: a payload that is not an nvlist or a checksum that
 	// does not match.
 	ErrBadReplicationStream = primitives.ErrBadPackage
+	// ErrPartialReceive is returned, after all the data of a replication
+	// stream was received, when the target could not be brought in line with
+	// the sender: something to destroy, rename or promote was left.
+	ErrPartialReceive = primitives.ErrPartialReceive
 	// ErrSendIncomplete is returned, after the stream was written, when some
 	// datasets or snapshots could not be sent; the stream holds the rest.
 	ErrSendIncomplete = primitives.ErrSendIncomplete
