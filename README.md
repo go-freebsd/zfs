@@ -6,9 +6,9 @@ libzfs, no libzfs_core, no cgo. The sibling of
 
 > **Status: work in progress.** Reading, properties, creating, snapshots,
 > clones, holds, bookmarks, destroy, rename, rollback, promote, encryption keys,
-> mounting and send/receive of single-snapshot streams work and are tested against
-> a real pool on FreeBSD 14.3 and 15.0. Replication streams (`send -R`/`-p`) are
-> next. Nothing here is released yet. Needs Go 1.23.
+> mounting and send/receive, replication streams (`send -R`/`-p`/`-I`/`-h`) included,
+> work and are tested against a real pool on FreeBSD 14.3 and 15.0. Nothing here is
+> released yet. Needs Go 1.23.
 
 | Package | What it is |
 |---|---|
@@ -84,7 +84,9 @@ got, err := c.Dataset("tank/backup/data").Receive(ctx, os.Stdin, zfs.Resumable()
 
 n, err := snap.SendSize(zfs.Compressed())                    // zfs send -n
 err = snap.Send(ctx, w, zfs.Raw())                           // zfs send -w: stays encrypted
-err = snap.Send(ctx, w, zfs.SendIntermediates(first))        // all snapshots between, in order
+err = snap.Send(ctx, w, zfs.SendIntermediates(first))        // zfs send -I: all snapshots between
+err = snap.Send(ctx, w, zfs.Replicate(), zfs.SendHolds())    // zfs send -R -h: the tree, its clones, props, holds
+err = snap.Send(ctx, w, zfs.Replicate(), zfs.SendFrom(old))  // zfs send -R -i: incremental
 err = snap.Send(ctx, w, zfs.OnProgress(time.Second, func(p zfs.SendProgress) { ... }))
 
 token, ok, _ := dst.ResumeToken()                            // after an interrupted receive -s
@@ -96,6 +98,7 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | zfs(8) | here |
 |---|---|
 | `send`, `-i`, `-I` | `Snapshot.Send`, `SendFrom`, `SendIntermediates` |
+| `-R` `-p` `-h` `--skip-missing` | `Replicate`, `SendProps`, `SendHolds`, `SkipMissing` |
 | `-L` `-e` `-c` `-w` | `LargeBlocks`, `EmbeddedData`, `Compressed`, `Raw` |
 | `-n` | `Snapshot.SendSize` |
 | `-t`, `--saved`, `--redact`, `redact` | `Client.ResumeSend`, `Dataset.SendSaved`, `RedactedWith`, `Snapshot.Redact` |
@@ -105,13 +108,47 @@ err = snap.Send(ctx, w, zfs.RedactedWith(bm))                // zfs send --redac
 | `-u` | `NoMount` |
 | `-n` | `DryRun` |
 | `-d` `-e`, `-A` | `DiscardPool`, `LastElement`, `Dataset.AbortResume` |
+| `-k` | `SkipHolds` |
 
-Streams made here are byte for byte the streams `zfs send` makes, and the CI feeds them to
-`zfs receive` and the other way round. **Replication streams are not supported**: what
-`zfs send -R`, `-p` and `-I` write is a header, a list of filesystems and properties, and
-several streams, which libzfs takes apart in userland. `Receive` refuses them with
-`ErrReplicationStream` and creates nothing; `SendIntermediates` writes the plain
-streams one after the other instead, which `Receive` and `zfs receive` both take.
+Single-snapshot streams made here are byte for byte the streams `zfs send` makes, and the CI
+feeds them to `zfs receive` and the other way round.
+
+### Replication streams
+
+`zfs send -R`, `-p`, `-I` and `-h` write a header (an XDR nvlist that lists the datasets,
+their snapshots, properties, clone origins and holds) in front of one ordinary stream per
+snapshot. libzfs makes and takes apart that envelope in userland; here it is done in Go,
+so a whole tree goes through one `io.Writer` and comes out of one `io.Reader`:
+
+```go
+pr, pw := io.Pipe()
+go func() { pw.CloseWithError(top.Send(ctx, pw, zfs.Replicate(), zfs.SendHolds())) }()
+got, err := backup.Receive(ctx, pr, zfs.NoMount())   // one Received per snapshot stream
+```
+
+The CI compares both directions with the CLI: the header of a stream made here has the
+same datasets, snapshots, properties and holds as the one `zfs send` writes, the kernel
+streams come in the same order (parents before children, clone origins before clones,
+intermediate snapshots only for `-I` and for clone origins) and the stream has the same
+length; `zfs receive` takes it and makes the same tree, and `Receive` of the CLI's stream
+makes the tree `zfs receive` makes: same snapshot GUIDs, properties as *received* values,
+snapshot properties, holds, clones.
+
+`Receive` of an incremental replication stream first brings the target in line with what
+the sender did since the base snapshot, as libzfs does (`recv_incremental_replication`):
+snapshots and datasets the sender destroyed are destroyed (only with `Force`), renamed
+snapshots and datasets are renamed, promoted clones are promoted. What cannot be done is
+reported as `ErrPartialReceive` after all data was received. A raw stream of an encrypted
+tree gets its encryption roots back afterwards. The tree is mounted once at the end unless
+`NoMount` is set.
+
+Differences and limits: `SendSize` of a replication stream adds up the estimates of its
+streams and, like `zfs send -n`, counts the first stream of a clone as a full one.
+`Intermediates` now writes the replication stream `zfs send -I` writes (earlier versions
+wrote the plain streams one after the other; `Receive` takes both). The header is limited
+to 128 MiB. Not done: `send -b`, resuming a replication stream, redacted `-R`, `receive -o`
+per dataset. `ErrReplicationStream` is no longer returned.
+
 `Heal` is passed to the kernel but is not tested against a corrupted pool.
 
 `Exclude` (`-x`) works the way libzfs does it: the property is inherited on the target
