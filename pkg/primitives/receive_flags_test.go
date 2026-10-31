@@ -148,9 +148,9 @@ func TestDryRunSeesATruncatedOrBrokenStream(t *testing.T) {
 	if len(k.writes) != 0 {
 		t.Errorf("the kernel was called: %v", k.writes)
 	}
-	// Replication streams stay refused.
+	// A replication stream with a damaged header is refused.
 	comp := append(headerOrder(binary.NativeEndian, "pool/src@one", 0, FeatureLZ4, 0, hdrCompound), zrec(binary.NativeEndian, drrEnd)...)
-	if _, err := dry(c, comp, "tank/new", ReceiveOptions{}); !errors.Is(err, ErrCompoundStream) {
+	if _, err := dry(c, comp, "tank/new", ReceiveOptions{}); !errors.Is(err, ErrBadPackage) {
 		t.Errorf("compound: %v", err)
 	}
 }

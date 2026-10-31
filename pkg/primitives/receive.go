@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -76,6 +77,9 @@ type ReceiveOptions struct {
 	// checksums are not verified, and failures only the kernel can know
 	// (space, features) are not predicted.
 	DryRun bool
+	// SkipHolds (-k) does not put back the holds a replication stream
+	// carries.
+	SkipHolds bool
 }
 
 // Received is the outcome of receiving one stream.
@@ -94,6 +98,9 @@ type Received struct {
 	DryRun bool
 	// Mounted is where the received filesystem was mounted, if it was.
 	Mounted string
+	// Skipped is set for a stream of a replication stream whose snapshot
+	// existed already; it was read and ignored.
+	Skipped bool
 }
 
 // ReceiveError is the error of a receive that failed. Received holds what
@@ -111,6 +118,13 @@ func (e *ReceiveError) Unwrap() error { return e.Err }
 
 // receiveName makes the snapshot name for a stream.
 func receiveName(target string, h *StreamHeader, layout Layout) (string, error) {
+	return receiveNameFrom(target, h, layout, h.Dataset())
+}
+
+// receiveNameFrom is receiveName for a stream that is part of a replication
+// stream: sendfs is the dataset the replication stream was made from, and the
+// names of the streams below it keep their path below sendfs.
+func receiveNameFrom(target string, h *StreamHeader, layout Layout, sendfs string) (string, error) {
 	snap := h.Snapshot()
 	if snap == "" {
 		return "", fmt.Errorf("%w: the stream has no snapshot name (%q)", ErrNotAStream, h.ToName)
@@ -121,16 +135,20 @@ func receiveName(target string, h *StreamHeader, layout Layout) (string, error) 
 		}
 		return target, nil
 	}
-	ds := h.Dataset()
+	to := h.ToName
 	switch layout {
 	case LayoutDiscardPool:
-		if _, rest, ok := strings.Cut(ds, "/"); ok {
-			return target + "/" + rest + "@" + snap, nil
+		if i := strings.IndexAny(to, "/@"); i >= 0 && to[i] == '/' {
+			return target + to[i:], nil
 		}
+		return target + "@" + snap, nil
 	case LayoutLastElement:
-		return target + "/" + ds[strings.LastIndexByte(ds, '/')+1:] + "@" + snap, nil
+		if i := strings.LastIndexByte(sendfs, '/'); i >= 0 {
+			return target + to[i:], nil
+		}
+		return target + "/" + to, nil
 	}
-	return target + "@" + snap, nil
+	return target + to[len(sendfs):], nil
 }
 
 // ReceiveFD receives one stream from a file descriptor, whose header h has
@@ -138,6 +156,20 @@ func receiveName(target string, h *StreamHeader, layout Layout) (string, error) 
 // header. snapshot is the full name of the snapshot to create. The call is
 // not repeated if interrupted.
 func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveOptions) (Received, error) {
+	return c.receiveFD(h, fd, snapshot, o, nil)
+}
+
+// substream carries what a replication stream adds to one of its streams.
+type substream struct {
+	// props are the properties the stream's dataset had on the sender; they
+	// are received as "received" values.
+	props *nvlist.List
+	// noMount leaves mounting to the caller, which mounts the whole tree
+	// when it is done.
+	noMount bool
+}
+
+func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveOptions, sub *substream) (Received, error) {
 	rec := Received{Header: h, Snapshot: snapshot}
 	if o == nil {
 		o = &ReceiveOptions{}
@@ -182,24 +214,58 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		return rec, err
 	}
 
+	// A stream that makes a new filesystem on an existing one replaces it,
+	// which cannot be done online: unmount it and what is below first.
+	newfs := (h.FromGUID == 0 || h.Clone || o.Origin != "") && !h.Resuming
+
 	in := nvlist.New()
 	in.Add("snapname", snapshot)
-	if len(o.Props) > 0 || len(excluded) > 0 {
-		lp := nvlist.New()
-		for _, k := range sortedKeys(o.Props) {
-			v, err := convertProp(k, o.Props[k], false)
-			if err != nil {
-				return rec, err
-			}
-			lp.Add(k, v)
+	lp := nvlist.New()
+	for _, k := range sortedKeys(o.Props) {
+		v, err := convertProp(k, o.Props[k], false)
+		if err != nil {
+			return rec, err
 		}
+		lp.Add(k, v)
+	}
+	if sub != nil && sub.props != nil {
+		rp := sub.props
+		// A property that cannot be inherited cannot be excluded either:
+		// it is left out of the received values instead.
+		var drop []string
 		for _, k := range excluded {
-			lp.Add(k, nvlist.Flag{}) // a boolean entry means -x
+			if info, ok := LookupProp(k); ok && info.Kind != KindUser && !info.Inherits && rp.Has(k) {
+				drop = append(drop, k)
+			}
 		}
+		if len(drop) > 0 {
+			rp = copyList(rp, drop)
+			excluded = removeAll(excluded, drop)
+		}
+		in.Add("props", rp)
+		// The stream's own dataset is not encrypted; without this the new
+		// filesystem would inherit encryption from its parent.
+		if newfs && !h.Raw() {
+			if _, set := o.Props["encryption"]; !set {
+				lp.Add("encryption", uint64(2)) // ZIO_CRYPT_OFF
+			}
+		}
+	}
+	for _, k := range excluded {
+		lp.Add(k, nvlist.Flag{}) // a boolean entry means -x
+	}
+	if lp.Len() > 0 {
 		in.Add("localprops", lp)
 	}
-	if o.Origin != "" {
-		in.Add("origin", o.Origin)
+	origin := o.Origin
+	if origin == "" && h.Clone {
+		// A clone stream names its origin by GUID.
+		if origin, err = c.findByGUID(snapshot, h.FromGUID, false); err != nil {
+			return rec, fmt.Errorf("zfs: receive: local origin for clone %s does not exist: %w", snapshot, err)
+		}
+	}
+	if origin != "" {
+		in.Add("origin", origin)
 	}
 	raw := make([]nvlist.Byte, len(h.raw))
 	for i, b := range h.raw {
@@ -217,9 +283,6 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 		in.Add("heal", nvlist.Flag{})
 	}
 
-	// A stream that makes a new filesystem on an existing one replaces it,
-	// which cannot be done online: unmount it and what is below first.
-	newfs := (h.FromGUID == 0 || h.Clone || o.Origin != "") && !h.Resuming
 	var cl *changelist
 	if exists && h.Type == Filesystem && (newfs || h.Resuming && h.FromGUID == 0) {
 		if cl, err = c.gather(ds, "name", false); err != nil {
@@ -251,7 +314,7 @@ func (c *Client) ReceiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 	if recvErr != nil {
 		return rec, recvErr
 	}
-	if !exists && h.Type == Filesystem && !o.NoMount && !h.Redacted() {
+	if !exists && h.Type == Filesystem && !o.NoMount && !h.Redacted() && (sub == nil || !sub.noMount) {
 		mountErr = firstThen(mountErr, c.autoMount(ds))
 	}
 	if where, ok, _ := c.IsMounted(ds); ok && !o.NoMount {
@@ -320,8 +383,8 @@ func (r *Received) fill(l *nvlist.List) {
 // If r is an *os.File its descriptor is passed to the kernel (and made
 // blocking); other readers are copied into a pipe by a goroutine. Cancelling
 // ctx ends the transfer of a pipe fed receive; the goroutine copying from r
-// ends when r returns. Replication streams (send -R/-p) are refused with
-// ErrCompoundStream.
+// ends when r returns. Replication streams (send -R, -p, -I, -h) are
+// received stream by stream.
 func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *ReceiveOptions) ([]Received, error) {
 	if o == nil {
 		o = &ReceiveOptions{}
@@ -349,7 +412,15 @@ func (c *Client) Receive(ctx context.Context, r io.Reader, target string, o *Rec
 			return got, ctxOr(ctx, err)
 		}
 		if h.Compound {
-			return got, ErrCompoundStream
+			recs, err := c.receivePackage(ctx, src, h, target, o, prev)
+			got = append(got, recs...)
+			if err != nil {
+				return got, err
+			}
+			if o.DryRun && len(recs) > 0 {
+				prev = recs[len(recs)-1].Header
+			}
+			continue
 		}
 		name, err := receiveName(target, h, o.Layout)
 		if err != nil {
@@ -448,4 +519,25 @@ func (c *Client) AbortResume(dataset string) error {
 		return fmt.Errorf("%w: %s", ErrNoResumeState, dataset)
 	}
 	return c.destroyHead(dataset)
+}
+
+// copyList returns a copy of l without the named pairs.
+func copyList(l *nvlist.List, without []string) *nvlist.List {
+	out := nvlist.New()
+	for _, p := range l.Pairs() {
+		if !slices.Contains(without, p.Name) {
+			out.Add(p.Name, p.Value)
+		}
+	}
+	return out
+}
+
+func removeAll(s, drop []string) []string {
+	var out []string
+	for _, x := range s {
+		if !slices.Contains(drop, x) {
+			out = append(out, x)
+		}
+	}
+	return out
 }

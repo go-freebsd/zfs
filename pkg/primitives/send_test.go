@@ -523,8 +523,13 @@ func TestReceiveRefusesWhatItCannotDo(t *testing.T) {
 	c := newClient(k)
 	ctx := context.Background()
 	compound := header("pool@x", 0, FeatureSASpill, 20, hdrCompound)
-	if _, err := c.Receive(ctx, bytes.NewReader(compound), "tank/new", nil); !errors.Is(err, ErrCompoundStream) {
+	// A replication header that is cut short or fails its checksum is an error
+	// and reaches no dataset.
+	if _, err := c.Receive(ctx, bytes.NewReader(compound), "tank/new", nil); !errors.Is(err, ioctl.ErrStreamTruncated) {
 		t.Errorf("compound: %v", err)
+	}
+	if len(k.writes) != 0 {
+		t.Errorf("the kernel was called: %v", k.writes)
 	}
 	if _, err := c.Receive(ctx, strings.NewReader(strings.Repeat("x", 400)), "tank/new", nil); !errors.Is(err, ErrNotAStream) {
 		t.Errorf("garbage: %v", err)
