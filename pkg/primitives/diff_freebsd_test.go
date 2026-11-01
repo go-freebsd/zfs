@@ -566,3 +566,46 @@ func TestDiffEscapesLikeZfs(t *testing.T) {
 	sort.Strings(got)
 	sameDiff(t, "escaped names", got, theirDiff(t, src+"@a", src+"@b"))
 }
+
+// A clone that cannot be destroyed (a file in it is open, so it cannot be
+// unmounted) stops zfs destroy -R of its origin snapshot before any snapshot
+// goes: the CLI says so and exits. The library does the same: it fails, and
+// the snapshot and the clone are still there.
+func TestDestroySnapshotWithBusyCloneLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src, _ := source(t, c, pool, "sb_src", nil, map[string]string{"keep": "k"})
+	snap(t, c, src+"@a")
+	snap(t, c, src+"@b")
+
+	clone := wds(t, pool, "sb_clone")
+	cdir := tdir(t)
+	if err := c.Clone(clone, src+"@a", &CreateOptions{Props: map[string]any{"mountpoint": cdir}}); err != nil {
+		t.Fatal(err)
+	}
+	ensureMounted(t, clone)
+	busy, err := os.Open(filepath.Join(cdir, "keep"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	state := func() string {
+		return cli(t, "zfs", "list", "-H", "-r", "-t", "all", "-o", "name", src) + "\n--\n" +
+			cli(t, "zfs", "list", "-H", "-o", "name", clone)
+	}
+	before := state()
+
+	if out, err := exec.Command("zfs", "destroy", "-R", src+"@a").CombinedOutput(); err == nil {
+		t.Fatalf("zfs destroy -R succeeded with an open file in the clone:\n%s", out)
+	}
+	if got := state(); got != before {
+		t.Fatalf("zfs destroy -R changed things although it failed:\n%s\n--- was\n%s", got, before)
+	}
+
+	if err := c.Destroy(src+"@a", &DestroyOptions{Clones: true}); err == nil {
+		t.Error("Destroy with Clones succeeded with an open file in the clone")
+	}
+	if got := state(); got != before {
+		t.Errorf("Destroy with Clones changed things although it failed:\n%s\n--- was\n%s", got, before)
+	}
+}
