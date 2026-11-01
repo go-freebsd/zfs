@@ -107,6 +107,36 @@ type Received struct {
 	Skipped bool
 }
 
+// checkHeal makes the checks zfs receive -c makes before it asks the kernel
+// (libzfs zfs_receive_one): no flag that changes where or how the stream is
+// received, and an existing snapshot that is the one the stream holds.
+func (c *Client) checkHeal(h *StreamHeader, snapshot string, o *ReceiveOptions) error {
+	for _, f := range []struct {
+		set  bool
+		name string
+	}{
+		{o.Force, "Force"}, {o.Resumable, "Resumable"}, {o.NoMount, "NoMount"},
+		{o.Parents, "Parents"}, {o.SkipHolds, "SkipHolds"},
+		{o.Layout != LayoutExact, "a Layout other than LayoutExact"},
+	} {
+		if f.set {
+			return fmt.Errorf("%w: a corrective receive (Heal) cannot be combined with %s", ErrIncompatibleOptions, f.name)
+		}
+	}
+	d, err := c.Get(snapshot)
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return fmt.Errorf("zfs: receive: Heal needs an existing snapshot to heal, %q does not exist: %w", snapshot, err)
+		}
+		return err
+	}
+	if d.GUID != h.ToGUID {
+		return fmt.Errorf("zfs: receive: the local snapshot %q does not match the snapshot in the stream (guid %#x, stream %#x): %w",
+			snapshot, d.GUID, h.ToGUID, syscall.EINVAL)
+	}
+	return nil
+}
+
 // ReceiveError is the error of a receive that failed. Received holds what
 // is known about the attempt, Err the cause (an *ioctl.Error that unwraps to
 // the errno).
@@ -193,6 +223,11 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 	if o.DryRun {
 		return rec, errors.New("zfs: receive: a dry run reads the stream itself, use Receive")
 	}
+	if o.Heal {
+		if err := c.checkHeal(h, snapshot, o); err != nil {
+			return rec, err
+		}
+	}
 	// The ioctl takes the filesystem that holds the new dataset: the target
 	// itself if it exists, else its parent.
 	if o.Parents || o.Layout == LayoutDiscardPool {
@@ -236,7 +271,9 @@ func (c *Client) receiveFD(h *StreamHeader, fd int, snapshot string, o *ReceiveO
 
 	// A stream that makes a new filesystem on an existing one replaces it,
 	// which cannot be done online: unmount it and what is below first.
-	newfs := (h.FromGUID == 0 || h.Clone || o.Origin != "") && !h.Resuming
+	// A corrective receive writes into a snapshot that exists: it replaces
+	// nothing.
+	newfs := (h.FromGUID == 0 || h.Clone || o.Origin != "") && !h.Resuming && !o.Heal
 
 	in := nvlist.New()
 	in.Add("snapname", snapshot)

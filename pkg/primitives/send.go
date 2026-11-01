@@ -222,11 +222,12 @@ func (c *Client) Redact(snapshot, bookmark string, redactionSnapshots []string) 
 	return err
 }
 
-// ErrIncompatibleOptions is returned, before anything is sent, for a
-// combination of send options that zfs send refuses as well: a replication
-// stream (Replicate, Intermediates) cannot be redacted, resumed or saved, and
-// a raw stream cannot be redacted.
-var ErrIncompatibleOptions = errors.New("zfs: send: incompatible options")
+// ErrIncompatibleOptions is returned, before anything is sent or received, for
+// a combination of options that zfs send or zfs receive refuses as well: a
+// replication stream (Replicate, Intermediates) cannot be redacted, resumed or
+// saved, a raw stream cannot be redacted, and a corrective receive (Heal)
+// takes neither Force, Resumable, NoMount, Parents, SkipHolds nor a Layout.
+var ErrIncompatibleOptions = errors.New("zfs: incompatible options")
 
 // check rejects the combinations zfs_do_send does (cmd/zfs/zfs_main.c).
 func (o *SendOptions) check() error {

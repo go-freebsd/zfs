@@ -167,7 +167,12 @@ rest as an incremental `-R` (`From`, `Intermediates`) from the newest snapshot e
 has; a dataset that did not arrive yet comes in full. (`zfs receive` takes no full stream
 onto a dataset that has snapshots, even with `-F`, and neither does `Receive`.)
 
-`Heal` is passed to the kernel but is not tested against a corrupted pool.
+`Heal` (`zfs receive -c`) makes the checks libzfs makes before the kernel is asked: it cannot be
+combined with `Force`, `Resumable`, `NoMount`, `Parents`, `SkipHolds` or a layout
+(`ErrIncompatibleOptions`), the target must be an existing snapshot, and its GUID must be the one
+of the stream. A FreeBSD test damages the data blocks of a file on a pool of its own, found with
+`zdb`, and has `zfs receive -c` and then `Receive` heal it, comparing the file and a scrub; both
+refuse the stream of another snapshot.
 
 `Exclude` (`-x`) works the way libzfs does it: the property is inherited on the target
 instead of taking the stream's value. A plain stream carries no properties, so this

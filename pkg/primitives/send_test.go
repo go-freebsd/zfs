@@ -461,14 +461,14 @@ func TestReceiveOptionsReachTheKernel(t *testing.T) {
 	k := newFake(t)
 	c := newClient(k)
 	_, err := c.Receive(context.Background(), recvInput(stream("pool/src@x", "")), "tank/new", &ReceiveOptions{
-		Force: true, Resumable: true, Heal: true, Origin: "tank/a@s1",
+		Force: true, Resumable: true, Origin: "tank/a@s1",
 		Props: map[string]any{"compression": "lz4", "note:from": "backup"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	in := k.writes[0].in
-	for _, f := range []string{"force", "resumable", "heal"} {
+	for _, f := range []string{"force", "resumable"} {
 		if !in.Has(f) {
 			t.Errorf("flag %s missing", f)
 		}
@@ -654,5 +654,50 @@ func TestReceiveDiscardPoolCreatesTheAncestors(t *testing.T) {
 	c.Receive(context.Background(), recvInput(stream("pool/p/q/src@x", "")), "tank/a/p/q/src", &ReceiveOptions{NoMount: true})
 	if got := created(k); len(got) != 0 {
 		t.Errorf("created %v", got)
+	}
+}
+
+func TestHealChecksLikeZfsReceive(t *testing.T) {
+	ctx := context.Background()
+	in := func() *bytes.Reader { return bytes.NewReader(stream("pool/src@x", "")) }
+
+	// flags that zfs receive -c refuses to combine
+	for name, o := range map[string]*ReceiveOptions{
+		"Force": {Force: true}, "Resumable": {Resumable: true}, "NoMount": {NoMount: true},
+		"Parents": {Parents: true}, "SkipHolds": {SkipHolds: true},
+		"-d": {Layout: LayoutDiscardPool}, "-e": {Layout: LayoutLastElement},
+	} {
+		k := newFake(t)
+		o.Heal = true
+		target := "tank/a@s1"
+		if o.Layout != LayoutExact {
+			target = "tank/a" // a layout needs a dataset as the target
+		}
+		_, err := newClient(k).Receive(ctx, in(), target, o)
+		if !errors.Is(err, ErrIncompatibleOptions) || len(k.writes) != 0 {
+			t.Errorf("Heal with %s: %v (%d writes)", name, err, len(k.writes))
+		}
+	}
+
+	// the snapshot must exist ...
+	k := newFake(t)
+	_, err := newClient(k).Receive(ctx, in(), "tank/a@nope", &ReceiveOptions{Heal: true})
+	if !errors.Is(err, syscall.ENOENT) || len(k.writes) != 0 {
+		t.Errorf("missing snapshot: %v (%d writes)", err, len(k.writes))
+	}
+	// ... and be the one the stream holds
+	k = newFake(t)
+	_, err = newClient(k).Receive(ctx, in(), "tank/a@s1", &ReceiveOptions{Heal: true})
+	if !errors.Is(err, syscall.EINVAL) || len(k.writes) != 0 {
+		t.Errorf("other snapshot: %v (%d writes)", err, len(k.writes))
+	}
+	// the same guid goes to the kernel with the flag
+	k = newFake(t)
+	k.ds["tank/a@s1"].guid = 0xabcdef
+	if _, err = newClient(k).Receive(ctx, in(), "tank/a@s1", &ReceiveOptions{Heal: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.writes) != 1 || !k.writes[0].in.Has("heal") {
+		t.Errorf("writes = %v", k.writes)
 	}
 }
