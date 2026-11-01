@@ -214,8 +214,10 @@ snapshots are deferred.
 of `-t` and the link count change shown as `(+1)`). The kernel reports which objects changed;
 the paths and stats come from `OBJ_TO_STATS` as in libzfs, and `DiffNow` makes the temporary
 snapshot `zfs diff` makes. Entries are in object order, paths start at the root of the dataset
-and are not escaped. The CI compares line by line with `zfs diff -Ft -H` for snapshots, the
-live filesystem and a clone.
+and are raw. `zfs diff -H` (scripted output) spells every byte that is not a visible ASCII
+character, and the backslash, as `\` plus four octal digits (a space is `\0040`); `EscapedPath()`,
+`EscapedNewPath()` and `EscapePath` do the same. The CI compares line by line with
+`zfs diff -Ft -H` for snapshots, the live filesystem, a clone and names that need escaping.
 
 ## Mounting
 

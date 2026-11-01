@@ -44,6 +44,41 @@ type DiffEntry struct {
 	LinkDelta int
 }
 
+// EscapePath spells a path the way zfs diff -H prints it (libzfs
+// stream_bytes): every byte that is not a visible 7-bit ASCII character, and
+// the backslash itself, becomes a backslash followed by the byte as four
+// octal digits. A space is "\0040", a newline "\0012", a backslash "\0134"
+// and the two bytes of a UTF-8 "é" "\0303\0251".
+func EscapePath(p string) string {
+	clean := true
+	for i := 0; i < len(p); i++ {
+		if !visible(p[i]) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return p
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if visible(p[i]) {
+			b.WriteByte(p[i])
+		} else {
+			fmt.Fprintf(&b, "\\%04o", p[i])
+		}
+	}
+	return b.String()
+}
+
+func visible(c byte) bool { return c > ' ' && c != '\\' && c < 0o177 }
+
+// EscapedPath is Path as zfs diff -H prints it, see EscapePath.
+func (e DiffEntry) EscapedPath() string { return EscapePath(e.Path) }
+
+// EscapedNewPath is NewPath as zfs diff -H prints it, see EscapePath.
+func (e DiffEntry) EscapedNewPath() string { return EscapePath(e.NewPath) }
+
 // dmu_diff_record_t: ddr_type is DDR_NONE (1), DDR_INUSE or DDR_FREE.
 const (
 	ddrInUse = 2

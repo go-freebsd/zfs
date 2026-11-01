@@ -29,6 +29,17 @@ func diffLine(e DiffEntry, mnt string) string {
 	return head
 }
 
+// escapedDiffLine is diffLine with the paths spelled as zfs diff -H spells
+// them.
+func escapedDiffLine(e DiffEntry, mnt string) string {
+	ts := fmt.Sprintf("%10d.%09d", e.Ctime.Unix(), e.Ctime.Nanosecond())
+	head := fmt.Sprintf("%s\t%c\t%c\t%s", ts, e.Change, e.Type, EscapePath(mnt)+e.EscapedPath())
+	if e.Change == DiffRenamed {
+		return head + "\t" + EscapePath(mnt) + e.EscapedNewPath()
+	}
+	return head
+}
+
 func mineDiff(t *testing.T, c *Client, from, to, mnt string) []string {
 	t.Helper()
 	var out []string
@@ -524,4 +535,34 @@ func TestDestroyLikeZfs(t *testing.T) {
 			t.Error("Defer on a dataset was accepted")
 		}
 	})
+}
+
+// Names that need escaping: zfs diff -H spells them with octal escapes, and
+// so do EscapedPath and EscapedNewPath.
+func TestDiffEscapesLikeZfs(t *testing.T) {
+	c, pool := testClient(t)
+	src, dir := source(t, c, pool, "df_esc", nil, map[string]string{"keep": "k", "old name": "o"})
+	snap(t, c, src+"@a")
+
+	names := []string{"with space", "new\nline", "tab\there", `back\slash`, "caf\u00e9", "ctrl\x01"}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Rename(filepath.Join(dir, "old name"), filepath.Join(dir, "renamed \u00fcber")); err != nil {
+		t.Fatal(err)
+	}
+	snap(t, c, src+"@b")
+
+	mnt := cli(t, "zfs", "get", "-H", "-o", "value", "mountpoint", src)
+	var got []string
+	for e, err := range c.Diff(context.Background(), src+"@a", src+"@b") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, escapedDiffLine(e, mnt))
+	}
+	sort.Strings(got)
+	sameDiff(t, "escaped names", got, theirDiff(t, src+"@a", src+"@b"))
 }

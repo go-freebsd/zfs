@@ -198,3 +198,24 @@ func TestDiffStopsEarlyAndOnCancel(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 }
+
+func TestEscapePath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/plain/name.txt": "/plain/name.txt",
+		"/a b":            `/a\0040b`,
+		"/a\nb":           `/a\0012b`,
+		"/a\tb":           `/a\0011b`,
+		`/a\b`:            `/a\0134b`,
+		"/café":           `/caf\0303\0251`,
+		"/del\x7f":        `/del\0177`,
+		"":                "",
+	} {
+		if got := EscapePath(in); got != want {
+			t.Errorf("EscapePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	e := DiffEntry{Path: "/a b", NewPath: "/c d"}
+	if e.EscapedPath() != `/a\0040b` || e.EscapedNewPath() != `/c\0040d` {
+		t.Errorf("EscapedPath = %q, EscapedNewPath = %q", e.EscapedPath(), e.EscapedNewPath())
+	}
+}
