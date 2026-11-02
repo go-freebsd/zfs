@@ -1,4 +1,2 @@
-github.com/go-freebsd/nvlist v1.0.0 h1:i65uYhE2dtNnZ1Hoc/W5mQVdcd0sXUifwFT8SVzfLyA=
-github.com/go-freebsd/nvlist v1.0.0/go.mod h1:oL2wZ/Vhhnxcwg/Bk+n2hyOnBQAdt+ZSwAffU18toGw=
-github.com/go-freebsd/nvlist v1.0.1-0.20261031075441-7407de4a4528 h1:Rhay0wGFIWMHR/IA0G1RLqu7rg+C7nN+YYsWuznQXrk=
-github.com/go-freebsd/nvlist v1.0.1-0.20261031075441-7407de4a4528/go.mod h1:oL2wZ/Vhhnxcwg/Bk+n2hyOnBQAdt+ZSwAffU18toGw=
+github.com/go-freebsd/nvlist v1.1.0 h1:rtfDxuXuJ4UmNrRBCgp1O5jIyncBQtDnmJKs6rF7Gwg=
+github.com/go-freebsd/nvlist v1.1.0/go.mod h1:oL2wZ/Vhhnxcwg/Bk+n2hyOnBQAdt+ZSwAffU18toGw=
