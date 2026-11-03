@@ -1,0 +1,56 @@
+name: arm64 diagnosis
+
+on:
+  push:
+    branches: [arm64-diag]
+
+jobs:
+  arm64:
+    name: FreeBSD 14.3 aarch64 diagnosis
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          arch: aarch64
+          sync: sshfs
+          usesh: true
+          prepare: |
+            pkg install -y go
+          run: |
+            set +e
+            cd "$GITHUB_WORKSPACE"
+            : > hb.log
+            # a heartbeat, so that the last lines before a crash say what the VM was doing
+            ( while true; do
+                { date -u +%T; sysctl -n vm.stats.vm.v_free_count vm.stats.vm.v_page_count kstat.zfs.misc.arcstats.size 2>&1 | tr '\n' ' '; echo; ps -axo pid,rss,etime,command | sort -k2 -n -r | head -n 4; } >> hb.log 2>&1
+                sleep 15
+              done ) &
+            {
+              date -u +%T; echo "== $(uname -sr) $(uname -m)"; sysctl hw.physmem hw.ncpu
+              kldload zfs 2>&1
+              truncate -s 512m /tmp/zpool.img
+              zpool create -f -m none testpool /tmp/zpool.img && zpool list
+              go version
+              sh internal/ci/fixtures.sh testpool || echo "FIXTURES FAILED"
+              date -u +%T; echo "== fixtures done"
+            } > test.log 2>&1
+            export ZFS_TEST_POOL=testpool
+            go vet ./... >> test.log 2>&1; echo "vet exit $?" >> test.log; date -u +%T >> test.log
+            go test -p 1 -v -count=1 -timeout 40m ./... >> test.log 2>&1
+            echo "test exit $?" >> test.log
+            date -u +%T >> test.log
+            exit 0
+      - name: Surface what the VM wrote
+        if: always()
+        run: |
+          for f in test.log hb.log; do
+            [ -f "$f" ] || { echo "::error::$f is missing"; continue; }
+            msg=$(tail -n 60 "$f" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=arm64 $f (last 60 lines)::$msg"
+          done
+          res=$(grep -E -- '^(=== RUN|--- |ok |FAIL|PASS|panic)' test.log 2>/dev/null | tail -n 40 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::notice title=arm64 test progress::$res"
