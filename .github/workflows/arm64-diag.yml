@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [skip-heal, stepwise]
+        variant: [live]
     steps:
       - uses: actions/checkout@v4
       - name: Test in FreeBSD VM
@@ -30,54 +30,27 @@ jobs:
           run: |
             set +e
             cd "$GITHUB_WORKSPACE"
-            : > hb.log; : > steps.log; : > test.log
+            : > hb.log; : > progress.log; : > steps.log
+            # the heartbeat must not keep the ssh session open: its own stdio goes away
             ( while true; do
                 { date -u +%T; sysctl -n vm.stats.vm.v_free_count kstat.zfs.misc.arcstats.size 2>&1 | tr '\n' ' '; echo; ps -axo pid,rss,etime,command | sort -k2 -n -r | head -n 3; } >> hb.log 2>&1
                 sleep 15
-              done ) &
+              done ) </dev/null >/dev/null 2>&1 &
             kldload zfs 2>&1
-            if [ "$VARIANT" = skip-heal ]; then
-              truncate -s 512m /tmp/zpool.img
-              zpool create -f -m none testpool /tmp/zpool.img >> test.log 2>&1
-              sh internal/ci/fixtures.sh testpool >> test.log 2>&1 || echo "FIXTURES FAILED" >> test.log
-              export ZFS_TEST_POOL=testpool
-              echo "go test start $(date -u +%T)" >> steps.log
-              go test -p 1 -v -count=1 -timeout 40m -skip 'TestHealLikeZfs' ./... > run.log 2>&1
-              echo "go test exit $? $(date -u +%T)" >> steps.log
-              grep -E -- '^(--- FAIL|FAIL|ok |panic)' run.log | head -n 20 >> steps.log
-            else
-              step() {
-                name="$1"; shift
-                echo "BEGIN $name $(date -u +%T)" >> steps.log
-                timeout 150 sh -c "$*" >> test.log 2>&1
-                rc=$?
-                echo "END   $name rc=$rc $(date -u +%T)" >> steps.log
-                dmesg | tail -n 3 >> steps.log
-              }
-              mkdir -p /tmp/heal /mnt/h
-              step create-pool "truncate -s 256m /tmp/heal/heal.img && zpool create -f -m none gozfsheal /tmp/heal/heal.img"
-              step create-fs "zfs create -o mountpoint=/mnt/h -o compression=off -o recordsize=128k gozfsheal/ds && dd if=/dev/urandom of=/mnt/h/data bs=1m count=1 && zpool sync gozfsheal && sha256 -q /mnt/h/data > /tmp/heal/sum"
-              step snapshot-send "zfs snapshot gozfsheal/ds@a && zfs send gozfsheal/ds@a > /tmp/heal/a.stream && touch /mnt/h/other && zfs snapshot gozfsheal/ds@b && zfs send gozfsheal/ds@b > /tmp/heal/b.stream"
-              ino=$(stat -f %i /mnt/h/data)
-              step export "zpool export gozfsheal"
-              step zdb "zdb -e -p /tmp/heal -ddddd gozfsheal/ds $ino > /tmp/heal/zdb.out; grep -c 'L0 0:' /tmp/heal/zdb.out"
-              step import "zpool import -d /tmp/heal gozfsheal"
-              step export2 "zpool export gozfsheal"
-              step corrupt "for b in \$(grep -o 'L0 0:[0-9a-f]*:[0-9a-f]*' /tmp/heal/zdb.out | head -n 4); do off=\$(echo \$b | cut -d: -f2); size=\$(echo \$b | cut -d: -f3); head -c \$((0x\$size)) /dev/urandom > /tmp/heal/garbage; dd if=/tmp/heal/garbage of=/tmp/heal/heal.img bs=512 seek=\$(( (0x\$off + 4194304) / 512 )) conv=notrunc 2>/dev/null; done"
-              step import2 "zpool import -d /tmp/heal gozfsheal"
-              step read-damaged "cat /mnt/h/data > /dev/null; echo read rc=\$?"
-              step receive-other "zfs receive -c gozfsheal/ds@a < /tmp/heal/b.stream; echo rc=\$?"
-              step receive-heal "zfs receive -c gozfsheal/ds@a < /tmp/heal/a.stream"
-              step compare "[ \"\$(sha256 -q /mnt/h/data)\" = \"\$(cat /tmp/heal/sum)\" ] && echo same"
-              step scrub "zpool clear gozfsheal; zpool scrub -w gozfsheal; zpool status -v gozfsheal"
-              echo "all steps done $(date -u +%T)" >> steps.log
-            fi
+            truncate -s 512m /tmp/zpool.img
+            zpool create -f -m none testpool /tmp/zpool.img >> steps.log 2>&1
+            sh internal/ci/fixtures.sh testpool >> steps.log 2>&1 || echo "FIXTURES FAILED" >> steps.log
+            export ZFS_TEST_POOL=testpool
+            echo "go test start $(date -u +%T)" >> steps.log
+            # every line of the test output goes to the host as it is written: each append closes the file
+            go test -p 1 -v -count=1 -timeout 25m ./... 2>&1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%T)" "$line" >> progress.log; done
+            echo "go test done $(date -u +%T)" >> steps.log
             exit 0
       - name: Surface what the VM wrote
         if: always()
         run: |
-          for f in steps.log test.log hb.log; do
+          for f in steps.log progress.log hb.log; do
             [ -f "$f" ] || { echo "::error::$f is missing"; continue; }
-            msg=$(tail -n 70 "$f" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            msg=$(tail -n 45 "$f" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
             echo "::notice title=${{ matrix.variant }} $f::$msg"
           done
